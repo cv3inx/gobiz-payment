@@ -16,7 +16,7 @@ Modul Node.js untuk berinteraksi dengan API GoBiz (GoPay Merchant) — memungkin
 
 ---
 
-## ✨ Fitur Utama
+## Fitur Utama
 
 - 🔐 **Autentikasi Otomatis** — Login menggunakan email & password, token disimpan dan diperbarui otomatis
 - 🏪 **Deteksi Merchant ID** — Merchant ID dideteksi secara otomatis dari akun yang login
@@ -27,7 +27,7 @@ Modul Node.js untuk berinteraksi dengan API GoBiz (GoPay Merchant) — memungkin
 
 ---
 
-## 📦 Instalasi
+## Instalasi
 
 Clone repo ini lalu install dependensi:
 
@@ -39,7 +39,7 @@ npm install
 
 ---
 
-## 🔑 Cara Mengatur Password Akun GoBiz
+## Cara Mengatur Password Akun GoBiz
 
 Modul ini memerlukan **email & password** untuk login ke API GoBiz. Jika kamu belum memiliki password (atau belum pernah mengaturnya), ikuti langkah berikut:
 
@@ -65,7 +65,7 @@ Modul ini memerlukan **email & password** untuk login ke API GoBiz. Jika kamu be
 
 ---
 
-## ⚙️ Konfigurasi
+## Konfigurasi
 
 ### File `.env`
 
@@ -106,9 +106,9 @@ Contoh isi file yang dibuat otomatis:
 
 ---
 
-## 🚀 Cara Penggunaan
+## Cara Penggunaan
 
-### 1. Menunggu Pembayaran Masuk ⭐ *(Direkomendasikan)*
+### 1. Menunggu Pembayaran Masuk *(Direkomendasikan)*
 
 > [!TIP]
 > **Mengapa Watcher lebih efisien?**
@@ -305,7 +305,7 @@ node demo.js 50000
 
 ---
 
-## 📖 API Reference
+## API Reference
 
 ### `default export: GoPayMerchant`
 
@@ -362,7 +362,7 @@ const watcher = getGoPayWatcher(10_000); // polling tiap 10 detik
 
 ---
 
-## 🔄 Alur Autentikasi
+## Alur Autentikasi
 
 ```mermaid
 flowchart TD
@@ -390,7 +390,7 @@ flowchart TD
 
 ---
 
-## ⚠️ Catatan Penting
+## Catatan Penting
 
 - Modul ini **bukan** library resmi Gojek/GoPay dan mengakses API internal GoBiz
 - Modul ini menggunakan `execFileSync('curl', ...)` untuk proses login — pastikan `curl` tersedia di sistem
@@ -403,24 +403,12 @@ flowchart TD
 
 ---
 
-## 📁 Struktur Export
-
-```js
-// Default export
-import GoPayMerchant from './gobiz.js';
-
-// Named exports
-import { GoPayWatcher, getGoPayWatcher } from './gobiz.js';
-```
-
----
-
 ## Star History
 
-<a href="https://www.star-history.com/?repos=kavionn%2Fgobiz-payment&type=timeline&logscale=&legend=bottom-right">
+<a href="https://www.star-history.com/?repos=kavionn%2Fgobiz-payment&type=date&logscale=&legend=bottom-right">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kavionn/gobiz-payment&type=timeline&theme=dark&logscale&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kavionn/gobiz-payment&type=timeline&logscale&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kavionn/gobiz-payment&type=timeline&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=kavionn/gobiz-payment&type=date&theme=dark&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=kavionn/gobiz-payment&type=date&logscale&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=kavionn/gobiz-payment&type=date&logscale&legend=bottom-right" />
  </picture>
 </a>
