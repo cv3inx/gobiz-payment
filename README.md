@@ -6,14 +6,14 @@
   <img src="https://img.shields.io/badge/SQLite-node%3Asqlite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
   <img src="https://img.shields.io/badge/API-GoBiz%20Merchant-00AED9?logoColor=white" alt="GoBiz API" />
   <img src="https://img.shields.io/badge/docs-Swagger-85EA2D?logo=swagger&logoColor=black" alt="Swagger" />
-  <a href="https://pay.violwtics.pw/docs"><img src="https://img.shields.io/badge/demo-pay.violwtics.pw-6f42c1" alt="Demo" /></a>
+  <a href="https://pay.violetics.pw/docs"><img src="https://img.shields.io/badge/demo-pay.violetics.pw-6f42c1" alt="Demo" /></a>
 </p>
 
 Payment gateway **self-hosted** di atas GoPay Merchant (GoBiz) — rasa payment
 gateway beneran, tapi jalan di server sendiri. Bikin QRIS dinamis, pantau
 pembayaran masuk otomatis, dan tembak **webhook** bertanda tangan saat lunas.
 
-🔗 **Demo:** [pay.violwtics.pw/docs](https://pay.violwtics.pw/docs) (Swagger UI)
+🔗 **Demo:** [pay.violetics.pw/docs](https://pay.violetics.pw/docs) (Swagger UI)
 
 Dibangun di atas library GoBiz dari [**kavionn/gobiz-payment**](https://github.com/kavionn/gobiz-payment) (lihat [Credit](#-credit)).
 
