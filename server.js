@@ -241,18 +241,22 @@ const statusColor = (s) => {
 };
 const methodColor = (m) => (useColor ? fg(35, m.padEnd(4)) : m.padEnd(4));
 app.use(morgan((tokens, req, res) => {
+   // Format: [TIME] STATUS path | METHOD - MS
    const status = tokens.status(req, res) || '---';
    const ms = `${tokens['response-time'](req, res) || '0'}ms`;
    return [
-      dim(tokens.ts()),
-      badge(LEVEL_META.http),
-      useColor ? fg(36, padScope('http')) : padScope('http'),
-      dim('│'),
+      dim(`[${tokens.ts()}]`),
       statusColor(status),
-      methodColor(tokens.method(req, res)),
       tokens.url(req, res),
+      dim('|'),
+      methodColor(tokens.method(req, res).trim()),
+      dim('-'),
       dim(ms),
    ].join(' ');
+}, {
+   // Don't log Swagger UI's own static assets — pure noise. Keeps the real
+   // API calls (and the /docs page load itself) visible.
+   skip: (req) => /^\/docs\/.+\.(js|css|png|ico|map)$/.test(req.originalUrl),
 }));
 
 // Swagger UI mounted before the strict CSP — its inline assets need a looser
@@ -260,8 +264,14 @@ app.use(morgan((tokens, req, res) => {
 // API surface itself is sensitive.
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec, {
    customSiteTitle: 'GoBiz Payment Gateway — API Docs',
+   swaggerOptions: {
+      persistAuthorization: true, // remember the X-API-Key across reloads
+      tryItOutEnabled: true,      // "Try it out" open by default
+      displayRequestDuration: true,
+   },
 }));
 app.get('/openapi.json', (req, res) => res.json(openApiSpec));
+app.get('/', (req, res) => res.redirect('/docs'));
 
 app.use(securityHeaders);
 app.use(express.json({ limit: '64kb' }));

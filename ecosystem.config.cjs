@@ -18,8 +18,8 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
       },
-      // logs go to PM2 default (~/.pm2/logs); view with `pm2 logs gobiz-payment`
-      time: true, // timestamp each log line
+      // logs go to PM2 default (~/.pm2/logs); view with `pm2 logs gobiz-payment`.
+      // No `time:` — the app's own logger already timestamps each line (avoid double stamp).
     },
   ],
 };

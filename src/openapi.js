@@ -3,12 +3,21 @@
 // when endpoints change. See docs/API.md for prose.
 
 const PORT = process.env.PORT || '3000';
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+
+// Server list for "Try it out". PUBLIC_URL first when set; a relative "/" entry
+// makes Swagger use the page's own origin (auto-detect, works anywhere it's served).
+const SERVERS = [
+   ...(PUBLIC_URL ? [{ url: PUBLIC_URL, description: 'Public' }] : []),
+   { url: '/', description: 'This host (relative)' },
+   { url: `http://localhost:${PORT}`, description: 'Local' },
+];
 
 const Transaction = {
    type: 'object',
    properties: {
       trxId: { type: 'string', example: 'TRX-K3F9Q2A7X1B4' },
-      status: { type: 'string', enum: ['PENDING', 'PAID', 'EXPIRED'] },
+      status: { type: 'string', enum: ['PENDING', 'PAID', 'EXPIRED'], example: 'PENDING' },
       amount: { type: 'integer', example: 50000, description: 'Base price (rupiah)' },
       fee: { type: 'integer', example: 2500, description: 'Admin fee added to amount' },
       uniqueCode: { type: 'integer', example: 137, description: 'Random code (1..UNIQUE_CODE_MAX) added for matching' },
@@ -17,13 +26,28 @@ const Transaction = {
          example: 52637,
          description: 'The single number the payer transfers = amount + fee + uniqueCode. Match key; the QR encodes this.',
       },
-      qrString: { type: 'string', description: 'Dynamic QRIS payload' },
+      qrString: { type: 'string', example: '00020101021226...5802ID...6304ABCD', description: 'Dynamic QRIS payload' },
       qrImageUrl: { type: 'string', example: 'https://pay.example.com/payment/TRX-K3F9Q2A7X1B4/qr.png' },
-      callbackUrl: { type: 'string', nullable: true },
-      metadata: { nullable: true },
-      createdAt: { type: 'string', format: 'date-time' },
-      expiresAt: { type: 'string', format: 'date-time' },
-      paidAt: { type: 'string', format: 'date-time', nullable: true },
+      callbackUrl: { type: 'string', nullable: true, example: 'https://shop.example.com/hook' },
+      metadata: { nullable: true, example: { orderId: 1042 } },
+      createdAt: { type: 'string', format: 'date-time', example: '2026-07-10T12:24:56.000Z' },
+      expiresAt: { type: 'string', format: 'date-time', example: '2026-07-10T12:29:56.000Z' },
+      paidAt: { type: 'string', format: 'date-time', nullable: true, example: null, description: 'null while PENDING; set when PAID' },
+   },
+   example: {
+      trxId: 'TRX-K3F9Q2A7X1B4',
+      status: 'PENDING',
+      amount: 50000,
+      fee: 2500,
+      uniqueCode: 137,
+      amountToPay: 52637,
+      qrString: '00020101021226...5802ID...6304ABCD',
+      qrImageUrl: 'https://pay.example.com/payment/TRX-K3F9Q2A7X1B4/qr.png',
+      callbackUrl: 'https://shop.example.com/hook',
+      metadata: { orderId: 1042 },
+      createdAt: '2026-07-10T12:24:56.000Z',
+      expiresAt: '2026-07-10T12:29:56.000Z',
+      paidAt: null,
    },
 };
 
@@ -48,11 +72,18 @@ export const openApiSpec = {
       title: 'GoBiz Payment Gateway',
       version: '1.0.0',
       description:
-         'Self-hosted QRIS payment gateway on top of GoPay Merchant (GoBiz). ' +
-         'Matching uses **amountToPay** (amount + fee + tiny offset) — always show ' +
-         'that value to the payer. See docs/API.md for details.',
+         'Self-hosted QRIS payment gateway. Create payments, generate dynamic ' +
+         'QR codes, track status by transaction ID, and receive signed webhooks ' +
+         'when a payment is settled. See docs/API.md for the full guide.\n\n' +
+         '📦 **Source:** [github.com/cv3inx/gobiz-payment](https://github.com/cv3inx/gobiz-payment)',
+      contact: { name: 'GitHub — cv3inx/gobiz-payment', url: 'https://github.com/cv3inx/gobiz-payment' },
+      license: { name: 'MIT', url: 'https://github.com/cv3inx/gobiz-payment/blob/main/LICENSE' },
    },
-   servers: [{ url: `http://localhost:${PORT}` }],
+   externalDocs: {
+      description: 'GitHub repository',
+      url: 'https://github.com/cv3inx/gobiz-payment',
+   },
+   servers: SERVERS,
    components: {
       securitySchemes: {
          ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key', description: 'Set API_KEY in .env to enable' },
