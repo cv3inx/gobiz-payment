@@ -1,405 +1,292 @@
-# GoBiz Payment
+# GoBiz Payment Gateway
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
-  <img src="https://img.shields.io/badge/JavaScript-f7df1e?logo=javascript&logoColor=black" alt="JavaScript" />
-  <img src="https://img.shields.io/badge/ES_Modules-4B32C3?logo=javascript&logoColor=white" alt="ES Modules" />
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
+  <img src="https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white" alt="Express" />
+  <img src="https://img.shields.io/badge/SQLite-node%3Asqlite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
   <img src="https://img.shields.io/badge/API-GoBiz%20Merchant-00AED9?logoColor=white" alt="GoBiz API" />
-  <img src="https://img.shields.io/badge/requires-curl-073551?logo=curl&logoColor=white" alt="curl" />
-
+  <img src="https://img.shields.io/badge/docs-Swagger-85EA2D?logo=swagger&logoColor=black" alt="Swagger" />
+  <a href="https://pay.violwtics.pw/docs"><img src="https://img.shields.io/badge/demo-pay.violwtics.pw-6f42c1" alt="Demo" /></a>
 </p>
 
-Modul Node.js untuk berinteraksi dengan API GoBiz (GoPay Merchant) — memungkinkan pengambilan riwayat transaksi dan pemantauan pembayaran masuk secara real-time menggunakan polling otomatis.
+Payment gateway **self-hosted** di atas GoPay Merchant (GoBiz) — rasa payment
+gateway beneran, tapi jalan di server sendiri. Bikin QRIS dinamis, pantau
+pembayaran masuk otomatis, dan tembak **webhook** bertanda tangan saat lunas.
+
+🔗 **Demo:** [pay.violwtics.pw/docs](https://pay.violwtics.pw/docs) (Swagger UI)
+
+Dibangun di atas library GoBiz dari [**kavionn/gobiz-payment**](https://github.com/kavionn/gobiz-payment) (lihat [Credit](#-credit)).
 
 > [!WARNING]
-> **Peringatan Risiko Banned:** Penggunaan otomatisasi login atau polling API yang terlalu sering dan agresif berisiko membuat akun GoBiz Anda terdeteksi dan terkena **banned/blokir**. Penggunaan modul ini sepenuhnya merupakan tanggung jawab Anda sendiri.
+> **Risiko banned:** otomatisasi login & polling API GoBiz yang terlalu agresif
+> berisiko membuat akun kamu **terblokir**. Pakai dengan risiko sendiri. Ini
+> **bukan** library resmi Gojek/GoPay — mengakses API internal GoBiz.
 
 ---
 
-## ✨ Fitur Utama
+## ✨ Fitur
 
-- 🔐 **Autentikasi Otomatis** — Login menggunakan email & password, token disimpan dan diperbarui otomatis
-- 🏪 **Deteksi Merchant ID** — Merchant ID dideteksi secara otomatis dari akun yang login
-- 📋 **Riwayat Transaksi** — Ambil transaksi dari Analytics API maupun Journal API dengan fallback otomatis
-- 👁️ **Pemantauan Pembayaran** — Pantau transaksi masuk secara real-time dengan polling interval
-- ⏳ **Tunggu Pembayaran** — Await pembayaran dengan nominal tertentu + toleransi + timeout
-- ♻️ **Singleton Watcher** — `getGoPayWatcher()` selalu mengembalikan instance yang sama; polling hanya berjalan sekali meski dipanggil dari banyak tempat
+- 🧾 **Create payment** — 1 endpoint, QRIS dinamis + gambar PNG langsung (tanpa upload eksternal)
+- 🔎 **Check by trxId** — cek status pakai ID transaksi kamu sendiri (atau auto `TRX-xxxx`)
+- 🪝 **Webhook otomatis** — begitu bayar masuk, callback ditembak (HMAC-SHA256, retry 3×)
+- 🔗 **Custom webhook per-trx** — `callbackUrl` di body meng-override `WEBHOOK_URL` global
+- 💰 **Fee manual** — `fee` ditambah ke `amount`; pembeli bayar `amountToPay`
+- 🆔 **Idempotency** — `Idempotency-Key` cegah double-charge saat retry
+- 🗄️ **SQLite** — transaksi persist di `data/transaction.db`, tahan restart
+- 🛡️ **Security** — API key (timing-safe), rate limit per-IP, security headers
+- 📚 **Swagger UI** — dokumentasi interaktif di `/docs`
+- 📈 **Morgan** — log tiap request, satu baris berwarna
+- ♻️ **Watcher in-process** — polling jalan otomatis di dalam server, PM2 jaga tetap hidup
 
 ---
 
 ## 📦 Instalasi
 
-Clone repo ini lalu install dependensi:
+Butuh **Node.js ≥ 22** (pakai `node:sqlite` bawaan — tanpa dependency SQLite).
 
 ```bash
-git clone https://github.com/kavionn/gobiz-payment.git
+git clone https://github.com/cv3inx/gobiz-payment.git
 cd gobiz-payment
 npm install
+cp .env.example .env   # lalu isi kredensial + QRIS_STRING
 ```
 
 ---
 
-## 🔑 Cara Mengatur Password Akun GoBiz
+## 🔑 Autentikasi (2 opsi)
 
-Modul ini memerlukan **email & password** untuk login ke API GoBiz. Jika kamu belum memiliki password (atau belum pernah mengaturnya), ikuti langkah berikut:
+Pilih salah satu:
 
-1. **Buka portal GoFood Merchant**
-   Kunjungi → [https://portal.gofoodmerchant.co.id](https://portal.gofoodmerchant.co.id)
+### Opsi A — Email & Password (auto-login)
 
-2. **Login menggunakan OTP**
-   Masukkan nomor HP yang terdaftar, lalu masukkan kode OTP yang dikirim via SMS.
+Kalau belum punya password:
 
-3. **Buka halaman Profile**
-   Setelah berhasil login, pergi ke:
-   [https://portal.gofoodmerchant.co.id/account/profile](https://portal.gofoodmerchant.co.id/account/profile)
+1. Buka [portal.gofoodmerchant.co.id](https://portal.gofoodmerchant.co.id)
+2. Login pakai OTP (nomor HP terdaftar)
+3. Ke [halaman Profile](https://portal.gofoodmerchant.co.id/account/profile)
+4. Atur / ubah **password login**, simpan
+5. Isi `GOPAY_EMAIL` + `GOPAY_PASSWORD` di `.env`
 
-4. **Atur password login**
-   Di halaman profile, cari opsi untuk mengatur atau mengubah **password login**, lalu simpan.
+### Opsi B — Access Token langsung (tanpa login)
 
-5. **Gunakan kredensial di `.env`**
-   Setelah password berhasil diatur, gunakan email & password tersebut di file `.env`:
-   ```env
-   GOPAY_EMAIL=email@merchant.com
-   GOPAY_PASSWORD=password_yang_baru_diatur
-   ```
+Kalau ga mau taruh password, ambil token dari browser:
+
+1. Login ke portal GoBiz di browser
+2. **F12 → Application → Cookies** → cari `access_token`, copy value-nya
+3. Isi `GOPAY_ACCESS_TOKEN` di `.env`
+4. (Opsional) isi `GOPAY_MERCHANT_ID` manual — kalau kosong, dideteksi otomatis dari token
+
+> Token menang kalau diisi. Token bisa expired — refresh manual (ambil ulang dari
+> cookies) saat gateway error 401. Untuk jalan jangka panjang tanpa perawatan,
+> Opsi A lebih enak (token di-refresh otomatis).
+
+Ambil `QRIS_STRING` dengan men-scan gambar QRIS statis dari portal GoBiz Merchant,
+paste hasilnya ke `.env`.
 
 ---
 
-## ⚙️ Konfigurasi
-
-### File `.env`
-
-Buat file `.env` di direktori yang **sama** dengan `gobiz.js` dan isi dengan kredensial akun GoBiz Merchant:
+## ⚙️ Konfigurasi (`.env`)
 
 ```env
+# Kredensial GoBiz — Opsi A (email/password) ATAU Opsi B (token)
 GOPAY_EMAIL=email@merchant.com
 GOPAY_PASSWORD=password_kamu
+# Opsi B: token dari F12 → Cookies → access_token
+GOPAY_ACCESS_TOKEN=
+GOPAY_MERCHANT_ID=
 
-# Diperlukan jika menggunakan demo.js
-# String QRIS statis dari akun GoPay Merchant kamu (bisa di-scan dari gambar QRIS)
+# QRIS statis merchant (wajib)
 QRIS_STRING=00020101021226...
 
-# Nominal pembayaran default (Rupiah), bisa di-override via argumen CLI
-PRICE_AMOUNT=2000
+# Gateway
+PORT=3000
+POLL_MS=7000          # interval cek pembayaran (ms) — jangan < 7000
+EXPIRE_MINUTES=5      # umur transaksi default (menit)
+RATE_MAX=60           # max request per IP per menit
+DB_FILE=              # default ./data/transaction.db
+
+# Webhook default (bisa di-override per-trx via callbackUrl)
+WEBHOOK_URL=https://app-kamu.com/webhook
+WEBHOOK_SECRET=ganti-ini-random-panjang
+
+# Proteksi endpoint tulis (kosongkan = nonaktif)
+API_KEY=
 ```
 
-Salin `.env.example` sebagai titik awal:
+`.gopay_cache.json` dibuat otomatis (menyimpan token + merchant ID), token
+di-refresh otomatis. Jangan commit `.env`, `.gopay_cache.json`, `transaction.db`.
+
+---
+
+## 🚀 Menjalankan
 
 ```bash
-cp .env.example .env
+npm start          # jalan biasa
+npm test           # self-check (QRIS, DB, security)
 ```
 
-### File `.gopay_cache.json` *(dibuat otomatis)*
+Buka **`http://localhost:3000/docs`** untuk Swagger UI interaktif.
 
-Modul ini akan **membuat sendiri** file `.gopay_cache.json` di direktori yang sama saat pertama kali login berhasil. File ini menyimpan token dan merchant ID agar tidak perlu login ulang setiap kali aplikasi dijalankan.
+Watcher pemantau pembayaran jalan **di dalam** proses server — begitu server
+hidup, cek pembayaran + webhook jalan otomatis di background. Tanpa cron, tanpa
+panggil check manual.
 
-Contoh isi file yang dibuat otomatis:
-
-```json
-{
-  "gopay_token": "eyJhbGci...",
-  "gopay_merchant_id": "M-XXXXXXXX"
-}
-```
-
-> **Catatan:** Token yang kadaluarsa akan di-refresh otomatis — kamu tidak perlu mengubah file ini secara manual.
-
----
-
-## 🚀 Cara Penggunaan
-
-### 1. Menunggu Pembayaran Masuk ⭐ *(Direkomendasikan)*
-
-> [!TIP]
-> **Mengapa Watcher lebih efisien?**
-> `GoPayWatcher` melakukan **satu request API** per interval, lalu mendeteksi semua transaksi baru dari hasilnya sekaligus — berapapun jumlahnya. Jauh lebih hemat dibanding memanggil `getHistory` secara terpisah untuk setiap order.
-
-Cara paling umum dan paling efisien — tunggu hingga ada pembayaran dengan nominal tertentu masuk.
-
-```js
-import { getGoPayWatcher } from './gobiz.js';
-
-// Atur seberapa sering API di-poll (default: 7000ms = 7 detik)
-const watcher = getGoPayWatcher(7_000);
-
-try {
-  const tx = await watcher.waitForPayment(50000, {
-    timeout: 5 * 60_000, // batas waktu maksimum menunggu (bukan frekuensi cek)
-    tolerance: 0         // toleransi selisih nominal (Rp)
-  });
-
-  console.log('✅ Pembayaran diterima!');
-  console.log('Nominal     :', tx.amount);
-  console.log('ID Transaksi:', tx.txId);
-  console.log('Detail      :', tx.entry);
-} catch (err) {
-  console.error('❌', err.message); // timeout atau error lain
-}
-```
-
-**Parameter `getGoPayWatcher`:**
-
-| Parameter    | Tipe     | Default | Keterangan                                         |
-|--------------|----------|---------|----------------------------------------------------|
-| `intervalMs` | `number` | `7000`  | Seberapa sering API di-poll (milidetik). Nilai terlalu kecil berisiko rate-limit. Disarankan ≥ 7000 ms |
-
-**Parameter `waitForPayment`:**
-
-| Parameter   | Tipe     | Default   | Keterangan                                                        |
-|-------------|----------|-----------|-------------------------------------------------------------------|
-| `amount`    | `number` | *(wajib)* | Nominal yang ditunggu (dalam Rupiah)                              |
-| `timeout`   | `number` | `300000`  | Batas waktu **maksimum** menunggu (ms) — bukan frekuensi polling  |
-| `tolerance` | `number` | `0`       | Toleransi selisih nominal (Rupiah)                                |
-
----
-
-### 2. Mengambil Riwayat Transaksi *(Untuk Keperluan Audit/Debug)*
-
-> [!NOTE]
-> `getHistory` berguna untuk membaca riwayat transaksi secara satu kali — misalnya untuk laporan, audit, atau debugging. **Jangan** gunakan ini sebagai pengganti `GoPayWatcher` untuk memantau pembayaran masuk secara real-time: memanggil `getHistory` berulang kali untuk banyak order sekaligus justru menghasilkan lebih banyak request dibanding watcher.
-
-```js
-import GoPayMerchant from './gobiz.js';
-
-const merchant = new GoPayMerchant();
-
-// ✅ Panggil ini secara manual setiap 2-5 menit, BUKAN dalam loop cepat
-const result = await merchant.getHistory({ days: 1, size: 20 });
-
-if (result.status) {
-  for (const tx of result.data.histories) {
-    console.log(tx.amount.displayed_text, '—', tx.time);
-  }
-} else {
-  console.error('Gagal:', result.message);
-}
-```
-
-**Contoh penggunaan untuk audit satu kali:**
-
-```js
-import GoPayMerchant from './gobiz.js';
-
-const merchant = new GoPayMerchant();
-
-// Panggil sekali untuk keperluan laporan/audit
-const result = await merchant.getHistory({ days: 7, size: 50 });
-if (result.status) {
-  for (const tx of result.data.histories) {
-    console.log(tx.amount.displayed_text, '—', tx.time);
-  }
-}
-```
-
-> Untuk pemantauan pembayaran real-time, gunakan `GoPayWatcher` — jauh lebih efisien karena cukup **1 request per interval** untuk mendeteksi semua transaksi baru sekaligus.
-
-**Parameter `getHistory`:**
-
-| Parameter | Tipe     | Default | Keterangan                              |
-|-----------|----------|---------|-----------------------------------------|
-| `days`    | `number` | `1`     | Rentang hari ke belakang                |
-| `size`    | `number` | `50`    | Jumlah maksimum transaksi yang diambil  |
-
-**Struktur item `histories`:**
-
-```js
-{
-  type: "payin",
-  amount: {
-    displayed_text: "Rp 50000"
-  },
-  time: "15 Jun 2026 - 13:00:00",
-  raw: { /* objek transaksi mentah dari API */ }
-}
-```
-
----
-
-### 3. Inisialisasi Manual dengan Token & Merchant ID
-
-Jika kamu sudah memiliki access token dan merchant ID, bisa langsung diisi tanpa proses login:
-
-```js
-import GoPayMerchant from './gobiz.js';
-
-const merchant = new GoPayMerchant({
-  token: 'eyJhbGci...',     // opsional
-  merchantId: 'M-XXXXXXXX' // opsional
-});
-
-const result = await merchant.getHistory({ days: 7, size: 100 });
-```
-
-> Jika `token` atau `merchantId` tidak diisi, keduanya akan di-resolve otomatis saat method pertama dipanggil.
-
----
-
-### 4. Mendengarkan Event Pembayaran Secara Manual
-
-
-`GoPayWatcher` adalah EventEmitter — kamu bisa langsung listen event `'payment'`:
-
-```js
-import { getGoPayWatcher } from './gobiz.js';
-
-const watcher = getGoPayWatcher(10_000); // polling tiap 10 detik
-
-watcher.on('payment', (data) => {
-  console.log('💸 Pembayaran masuk!');
-  console.log('Nominal     :', data.amount);
-  console.log('ID Transaksi:', data.txId);
-});
-```
-
-> Poller akan **otomatis berjalan** saat ada listener aktif dan **berhenti** saat semua listener dihapus.
-
----
-
-### 5. Reset Watcher
-
-Berguna saat testing agar transaksi lama bisa terdeteksi ulang:
-
-```js
-import { getGoPayWatcher } from './gobiz.js';
-
-const watcher = getGoPayWatcher();
-watcher.reset();
-// Semua ID transaksi yang diingat dihapus, seed ulang dimulai.
-```
-
----
-
-### 6. Contoh Script End-to-End (`demo.js`)
-
-Repo ini menyertakan `demo.js` — script siap pakai yang mendemonstrasikan alur pembayaran QRIS lengkap dari awal hingga selesai:
-
-```
-🔐 Auth ke GoBiz
-    ↓
-⚙️  Generate QRIS dinamis (sisipkan nominal + hitung ulang CRC16)
-    ↓
-🖼️  Render gambar QR Code
-    ↓
-☁️  Upload gambar → dapat URL
-    ↓
-📲  Tampilkan URL (kirim ke pengguna untuk di-scan)
-    ↓
-⏳  Tunggu pembayaran masuk via GoPayWatcher
-    ↓
-✅  Konfirmasi sukses → program selesai
-```
-
-**Cara menjalankan:**
+### Background (PM2)
 
 ```bash
-# Pakai nominal default dari .env (PRICE_AMOUNT)
-node demo.js
+npm i -g pm2
+npm run pm2:start   # pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup         # jalankan command yang dicetak → auto-nyala saat reboot
 
-# Atau tentukan nominal langsung
-node demo.js 50000
+npm run pm2:logs
+npm run pm2:restart
+npm run pm2:stop
 ```
 
 > [!IMPORTANT]
-> Pastikan `QRIS_STRING` sudah diisi di file `.env` sebelum menjalankan script ini.
-> String QRIS statis bisa didapat dengan men-scan gambar QRIS dari portal GoBiz Merchant.
+> Jalankan **1 instance** (fork mode — sudah diset). Jangan cluster mode:
+> poller dobel = webhook ketembak 2×.
 
 ---
 
-## 📖 API Reference
+## 📡 API Singkat
 
-### `default export: GoPayMerchant`
+Detail lengkap: [docs/API.md](docs/API.md) atau Swagger di `/docs`.
 
-Kelas utama untuk berinteraksi dengan API GoBiz Merchant.
+| Method | Path | Auth | Fungsi |
+|--------|------|:----:|--------|
+| POST | `/payment/create` | 🔑 | Buat pembayaran |
+| GET | `/payment/:trxId` | — | Cek status by trxId |
+| GET | `/payment/:trxId/qr.png` | — | Gambar QRIS (PNG) |
+| POST | `/payment/:trxId/cancel` | 🔑 | Batalkan (expire manual) |
+| GET | `/payments` | 🔑 | List transaksi (paginated) |
+| GET | `/history` | 🔑 | History transaksi GoBiz (arsip + `?matched=`) |
+| GET | `/health` | — | Health + counts |
 
-| Method                                    | Keterangan                                                          |
-|-------------------------------------------|---------------------------------------------------------------------|
-| `constructor(options?)`                   | `options.token` dan `options.merchantId` bersifat opsional          |
-| `async init()`                            | Inisialisasi: validasi/refresh token & resolve merchant ID          |
-| `async getHistory({ days, size })`        | Ambil riwayat transaksi (fallback Analytics → Journal)              |
-| `async getTransactionsAnalytics({ ... })` | Ambil transaksi dari Analytics API secara langsung                  |
-| `async getTransactionsJournal({ ... })`   | Ambil transaksi dari Journal API secara langsung                    |
+🔑 = butuh `X-API-Key: <API_KEY>` kalau `API_KEY` diset.
 
----
+### Contoh: create payment
 
-### `export class: GoPayWatcher`
+```bash
+curl -X POST http://localhost:3000/payment/create \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: API_KEY_KAMU' \
+  -d '{
+    "amount": 50000,
+    "fee": 2500,
+    "trxId": "ORDER-1042",
+    "callbackUrl": "https://tokoku.com/webhook"
+  }'
+```
 
-Kelas pemantau pembayaran berbasis `EventEmitter`.
+Body — cuma `amount` yang wajib:
 
-| Method                          | Keterangan                                                          |
-|---------------------------------|---------------------------------------------------------------------|
-| `constructor(merchant, intervalMs?)` | `merchant` adalah instance `GoPayMerchant`, `intervalMs` default `7000` ms |
-| `waitForPayment(amount, opts?)`  | Tunggu pembayaran nominal tertentu, returns `Promise`               |
-| `on('payment', callback)`        | Dengarkan event pembayaran masuk                                    |
-| `reset()`                        | Reset seed (hapus semua ID transaksi yang diingat)                  |
+| Field | Wajib | Isi |
+|-------|:-----:|-----|
+| `amount` | ✅ | Harga barang (rupiah) |
+| `fee` | ❌ | Biaya admin, ditambah ke amount. Default 0 |
+| `trxId` | ❌ | ID order kamu. Kosong = auto `TRX-xxxx` |
+| `callbackUrl` | ❌ | Webhook khusus trx ini, override `.env` |
+| `expireMinutes` | ❌ | Kadaluarsa (menit). Default 5 |
+| `metadata` | ❌ | Data bebas, dikembalikan di webhook |
 
-**Event `'payment'`** memancarkan objek:
+Respons berisi **`amountToPay`** = `amount + fee + uniqueCode` (kode random 1..999
+yang **selalu** ditambah). **Itu satu-satunya angka yang dibayar pembeli** dan yang
+dicocokkan gateway. Tampilkan `amountToPay`, bukan `amount`. Contoh: `amount 100` +
+`uniqueCode 52` → pembeli bayar `152`.
 
-```js
+### Webhook
+
+Saat `PAID` / `EXPIRED`, gateway POST ke `callbackUrl` (atau `WEBHOOK_URL`):
+
+```json
 {
-  amount: 50000,    // nominal dalam Rupiah (number)
-  txId: "TXN-...", // ID unik transaksi
-  entry: { ... }   // objek riwayat lengkap dari getHistory
+  "event": "payment.paid",
+  "trxId": "ORDER-1042",
+  "status": "PAID",
+  "amount": 50000,
+  "fee": 2500,
+  "uniqueCode": 137,
+  "amountToPay": 52637,
+  "paidAt": "2026-07-10T12:30:00.000Z",
+  "metadata": { "orderId": 1042 }
 }
 ```
 
+Header `X-Signature` = `HMAC-SHA256(WEBHOOK_SECRET, rawBody)`. Verifikasi pakai
+`verifyWebhookSignature` dari [src/security.js](src/security.js) — lihat [docs/API.md](docs/API.md).
+
 ---
 
-### `export function: getGoPayWatcher(intervalMs?)`
+## 🧠 Cara matching (penting)
 
-Mengembalikan instance `GoPayWatcher` singleton. Setiap kali fungsi ini dipanggil — dari file mana pun dalam satu proses — akan selalu mengembalikan instance yang **sama**, sehingga hanya ada **satu proses polling** yang berjalan di background.
+API GoBiz cuma melaporkan **nominal** pembayaran masuk — tidak ada cara menautkan
+`trxId` kita ke transfer pembeli. Jadi gateway bikin tiap `amountToPay` **unik**:
+`amount + fee` lalu tambah offset `0..99` rupiah kalau nominal itu sedang dipakai
+transaksi pending lain. Pembeli scan QR `amountToPay`, event pembayaran dicocokkan
+balik lewat nominal itu.
+
+**Konsekuensi:** `amountToPay` bisa lebih tinggi hingga 99 rupiah dari `amount + fee`.
+Selalu render QR + tampilkan `amountToPay`. Maks 100 transaksi pending boleh berbagi
+nominal dasar yang sama sebelum `/payment/create` balas `503`.
+
+---
+
+## 🧩 Struktur
+
+```
+server.js             Express gateway + wiring watcher (entry point)
+lib/gobiz.js          library GoBiz (auth, history, watcher) — dari kavionn
+src/db.js             SQLite (node:sqlite)
+src/security.js       API key, rate limit, headers, HMAC, SSRF guard
+src/openapi.js        spec OpenAPI untuk Swagger UI
+src/server.test.js    self-check
+data/transaction.db   database SQLite (dibuat otomatis)
+docs/API.md           dokumentasi API lengkap
+ecosystem.config.cjs  konfigurasi PM2
+demo.js               demo QRIS end-to-end (CLI, tanpa server)
+```
+
+---
+
+## 📚 Library GoBiz (dipakai internal)
+
+Gateway pakai `lib/gobiz.js`. Kalau mau pakai library-nya langsung:
 
 ```js
-import { getGoPayWatcher } from './gobiz.js';
+import GoPayMerchant, { getGoPayWatcher } from './lib/gobiz.js';
 
-const watcher = getGoPayWatcher(10_000); // polling tiap 10 detik
+const watcher = getGoPayWatcher(7_000);
+watcher.on('payment', ({ amount, txId }) => {
+  console.log('💸 masuk:', amount, txId);
+});
 ```
 
-| Parameter    | Tipe     | Default | Keterangan                                              |
-|--------------|----------|---------|---------------------------------------------------------|
-| `intervalMs` | `number` | `7000`  | Interval polling dalam milidetik. Disarankan ≥ 7000 ms |
+| Export | Fungsi |
+|--------|--------|
+| `GoPayMerchant` *(default)* | `init()`, `getHistory({ days, size })`, dst |
+| `GoPayWatcher` | EventEmitter, `waitForPayment(amount, opts)`, event `'payment'` |
+| `getGoPayWatcher(intervalMs?)` | Singleton watcher (1 poller per proses) |
 
-> **Catatan:** `intervalMs` hanya berlaku saat instance pertama kali dibuat. Pemanggilan `getGoPayWatcher()` berikutnya akan mengabaikan parameter ini karena instance sudah ada (singleton).
+Event `'payment'` memancarkan `{ amount, txId, entry }`. Detail method ada di
+komentar `lib/gobiz.js`.
 
 ---
 
-## 🔄 Alur Autentikasi
+## 🙏 Credit
 
-```mermaid
-flowchart TD
-    A([Panggil method apapun]) --> B{Token tersedia\ndi instance?}
-
-    B -- Tidak --> C{Ada di\n.gopay_cache.json?}
-    B -- Ya --> F
-
-    C -- Tidak --> E[Login otomatis\nbaca .env →\nGOPAY_EMAIL\nGOPAY_PASSWORD]
-    C -- Ya --> D[Muat token\ndari cache]
-
-    D --> F{Validasi token\nke API}
-    E --> G[Simpan token\nke .gopay_cache.json]
-    G --> F
-
-    F -- Valid --> H{Merchant ID\ntersedia?}
-    F -- Tidak valid --> E
-
-    H -- Tidak --> I[Fetch Merchant ID\ndari API]
-    H -- Ya --> K([Siap digunakan ✅])
-
-    I --> J[Simpan Merchant ID\nke .gopay_cache.json]
-    J --> K
-```
+- Library GoBiz inti (`lib/gobiz.js`, `demo.js`) berasal dari repo original
+  **[kavionn/gobiz-payment](https://github.com/kavionn/gobiz-payment)** oleh
+  [@kavionn](https://github.com/kavionn). Terima kasih 🙌
+- Lapisan payment gateway (Express, SQLite, webhook, security, Swagger, PM2)
+  ditambahkan di fork ini.
 
 ---
 
-## ⚠️ Catatan Penting
+## 📄 Lisensi
 
-- Modul ini **bukan** library resmi Gojek/GoPay dan mengakses API internal GoBiz
-- Modul ini menggunakan `execFileSync('curl', ...)` untuk proses login — pastikan `curl` tersedia di sistem
-- Email & password dibaca dari file `.env` di direktori yang sama dengan `gobiz.js`
-- Token & merchant ID disimpan ke `.gopay_cache.json` yang **dibuat otomatis** — tidak perlu konfigurasi tambahan
-- Token yang kadaluarsa akan di-refresh otomatis saat request gagal dengan status `401`
-- Cache ID transaksi di `GoPayWatcher` dibatasi **500 entri** untuk mencegah memory leak
-
-- Tambahkan `.env`, `.gopay_cache.json`, dan `node_modules/` ke `.gitignore` untuk keamanan
+MIT — lihat [LICENSE](LICENSE).
 
 ---
 

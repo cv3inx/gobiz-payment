@@ -3,8 +3,18 @@ node_modules/
 
 # Environment & secrets
 .env
-.gopay_cache.json
+data/gopay_cache.json
 
+# Data dir (cache + SQLite) — keep the folder, ignore contents
+data/*
+!data/.gitkeep
+
+# SQLite database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+    
 # Logs
 *.log
 npm-debug.log*
