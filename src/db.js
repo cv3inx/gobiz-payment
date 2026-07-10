@@ -1,16 +1,20 @@
-// SQLite persistence via node:sqlite (built-in, Node >=22). No external dep.
+// SQLite persistence via better-sqlite3 (synchronous, stable native binding).
 // ponytail: one table, JSON columns for metadata. Add indexes/migrations when
 // the schema actually changes.
-import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'transaction.db');
 
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-const db = new DatabaseSync(DB_FILE);
+const db = new Database(DB_FILE);
+// WAL mode: readers don't block the writer, and a crash/restart mid-write won't
+// corrupt the DB (journal replays on open). Creates -wal and -shm sidecar files.
+db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
 db.exec(`
    CREATE TABLE IF NOT EXISTS transactions (
       trxId          TEXT PRIMARY KEY,

@@ -24,9 +24,10 @@
   "author": "kavionn",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
     "crc": "^4.3.2",
     "dotenv": "^16.4.5",
     "express": "^4.22.2",

@@ -9,6 +9,7 @@ import QRCode from 'qrcode';
 import GoPayMerchant, { GoPayWatcher } from './lib/gobiz.js';
 import * as store from './src/db.js';
 import { openApiSpec } from './src/openapi.js';
+import { log, badge, padScope, dim, fg, bold, useColor, LEVEL_META } from './src/logger.js';
 import {
    securityHeaders,
    requireApiKey,
@@ -16,6 +17,11 @@ import {
    signBody,
    validateWebhookUrl,
 } from './src/security.js';
+
+const logHttp = log('http');
+const logTrx = log('trx');
+const logWebhook = log('webhook');
+const logBoot = log('server');
 
 /*
  * Self-hosted payment gateway on top of GoBiz/GoPay merchant.
@@ -45,7 +51,7 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, ''); // e.g. ht
 const UNIQUE_CODE_MAX = parseInt(process.env.UNIQUE_CODE_MAX || '999', 10);
 
 if (!QRIS_STRING) {
-   console.error('FATAL: QRIS_STRING not set in .env');
+   logBoot.error('FATAL: QRIS_STRING not set in .env');
    process.exit(1);
 }
 
@@ -145,16 +151,16 @@ async function fireWebhook(trx) {
             headers: { 'Content-Type': 'application/json', 'X-Signature': signature },
             body: bodyStr,
          });
-         if (res.ok) return;
-         console.warn(`[webhook] ${trx.trxId} attempt ${attempt} -> HTTP ${res.status}`);
+         if (res.ok) { logWebhook.ok(`${trx.trxId} delivered (HTTP ${res.status})`); return; }
+         logWebhook.warn(`${trx.trxId} attempt ${attempt} → HTTP ${res.status}`);
       } catch (e) {
          // undici's "fetch failed" hides the real reason in e.cause
          const why = e.cause?.code || e.cause?.message || e.message;
-         console.warn(`[webhook] ${trx.trxId} attempt ${attempt} failed: ${why} (${url})`);
+         logWebhook.warn(`${trx.trxId} attempt ${attempt} failed: ${why} (${url})`);
       }
       await new Promise((r) => setTimeout(r, attempt * 1000));
    }
-   console.error(`[webhook] ${trx.trxId} gave up after 3 attempts`);
+   logWebhook.error(`${trx.trxId} gave up after 3 attempts`);
 }
 
 function clearTimer(trxId) {
@@ -177,7 +183,7 @@ function markPaid(trx, entry) {
    trx.entry = entry || null;
    store.updateStatus(trx);
    clearTimer(trx.trxId);
-   console.log(`[trx] PAID ${trx.trxId} amount=${trx.payAmount}`);
+   logTrx.ok(`PAID ${trx.trxId} amountToPay=${trx.payAmount}`);
    fireWebhook(trx);
 }
 
@@ -214,7 +220,7 @@ watcher.on('payment', ({ amount, txId, entry }) => {
          seenAt: new Date().toISOString(),
       });
    } catch (e) {
-      console.warn('[history] archive failed:', e.message);
+      log('history').warn(`archive failed: ${e.message}`);
    }
 });
 
@@ -224,7 +230,30 @@ watcher._startPoller();
 // ── Express app ──────────────────────────────────────────────────────────────
 const app = express();
 app.set('trust proxy', true); // honor X-Forwarded-For when behind a reverse proxy
-app.use(morgan('dev')); // pretty, colored one-line-per-request log
+
+// Request log using the shared logger style: same badge/scope/columns.
+morgan.token('ts', () => new Date().toTimeString().slice(0, 8));
+const statusColor = (s) => {
+   if (!useColor) return s;
+   const n = parseInt(s, 10);
+   const code = n >= 500 ? 31 : n >= 400 ? 33 : n >= 300 ? 36 : 32;
+   return `\x1b[1;${code}m${s}\x1b[0m`;
+};
+const methodColor = (m) => (useColor ? fg(35, m.padEnd(4)) : m.padEnd(4));
+app.use(morgan((tokens, req, res) => {
+   const status = tokens.status(req, res) || '---';
+   const ms = `${tokens['response-time'](req, res) || '0'}ms`;
+   return [
+      dim(tokens.ts()),
+      badge(LEVEL_META.http),
+      useColor ? fg(36, padScope('http')) : padScope('http'),
+      dim('│'),
+      statusColor(status),
+      methodColor(tokens.method(req, res)),
+      tokens.url(req, res),
+      dim(ms),
+   ].join(' ');
+}));
 
 // Swagger UI mounted before the strict CSP — its inline assets need a looser
 // policy. ponytail: the docs page is public; gate it behind auth only if the
@@ -338,7 +367,7 @@ app.post('/payment/create', guard, (req, res) => {
       return res.status(503).json({ success: false, error: 'slot taken, retry' });
    }
    scheduleExpiry(trx);
-   console.log(`[trx] CREATE ${trx.trxId} amount=${amount} fee=${fee} payAmount=${payAmount}`);
+   logTrx.info(`CREATE ${trx.trxId} amount=${amount} fee=${fee} amountToPay=${payAmount}`);
 
    res.status(201).json({
       success: true,
@@ -406,18 +435,33 @@ function restorePending() {
          scheduleExpiry(trx);
       }
    }
-   if (pending.length) console.log(`[boot] restored ${pending.length} pending trx`);
+   if (pending.length) logBoot.info(`restored ${pending.length} pending trx`);
+}
+
+function banner() {
+   const base = PUBLIC_URL || `http://localhost:${PORT}`;
+   const lines = [
+      '',
+      fg(36, '  ┌─────────────────────────────────────────────┐'),
+      fg(36, '  │') + bold('   GoBiz Payment Gateway') + fg(36, '                    │'),
+      fg(36, '  └─────────────────────────────────────────────┘'),
+      `  ${dim('API ')} ${base}`,
+      `  ${dim('Docs')} ${base}/docs`,
+      '',
+   ];
+   console.log(useColor ? lines.join('\n') : `\n  GoBiz Payment Gateway\n  API  ${base}\n  Docs ${base}/docs\n`);
 }
 
 const server = http.createServer(app);
 server.listen(PORT, async () => {
-   console.log(`gobiz payment gateway listening on :${PORT}`);
+   banner();
+   logBoot.ok(`listening on :${PORT}`);
    restorePending();
    try {
       await merchant.init();
-      console.log('GoPay merchant authenticated');
+      logBoot.ok('GoPay merchant authenticated');
    } catch (e) {
-      console.error('GoPay auth failed (will retry on poll):', e.message);
+      logBoot.warn(`GoPay auth failed (will retry on poll): ${e.message}`);
    }
 });
 
@@ -428,18 +472,18 @@ let shuttingDown = false;
 function shutdown(signal) {
    if (shuttingDown) return;
    shuttingDown = true;
-   console.log(`\n[shutdown] ${signal} received, closing...`);
+   logBoot.info(`${signal} received, closing...`);
    watcher._stopPoller();
    for (const t of timers.values()) clearTimeout(t);
    timers.clear();
    server.close(() => {
       try { store.default.close(); } catch {}
-      console.log('[shutdown] done');
+      logBoot.ok('shutdown done');
       process.exit(0);
    });
    // hard cap so a hung connection can't block PM2's restart forever
    setTimeout(() => {
-      console.error('[shutdown] forced after 10s');
+      logBoot.error('shutdown forced after 10s');
       process.exit(1);
    }, 10_000).unref();
 }
