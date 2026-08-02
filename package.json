@@ -1,13 +1,18 @@
 {
-  "name": "gobiz-grab",
+  "name": "gobiz-payment",
   "version": "1.0.0",
-  "description": "Node.js module untuk berinteraksi dengan API GoBiz (GoPay Merchant) — riwayat transaksi & pemantauan pembayaran real-time.",
+  "description": "Self-hosted QRIS payment gateway di atas GoBiz (GoPay Merchant) — QRIS dinamis, matching pembayaran otomatis, webhook bertanda tangan.",
+  "private": true,
   "type": "module",
-  "main": "lib/gobiz.js",
-  "exports": "./lib/gobiz.js",
+  "main": "server.js",
+  "exports": {
+    ".": "./server.js",
+    "./lib/gobiz.js": "./lib/gobiz.js",
+    "./src/security.js": "./src/security.js"
+  },
   "scripts": {
     "start": "node server.js",
-    "test": "node src/server.test.js",
+    "test": "node tests/run.js",
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 stop gobiz-payment",
     "pm2:restart": "pm2 restart gobiz-payment",
@@ -21,7 +26,7 @@
     "merchant",
     "indonesia"
   ],
-  "author": "kavionn",
+  "author": "kavionn (lib/gobiz.js, demo.js), cv3inx (gateway layer)",
   "license": "MIT",
   "engines": {
     "node": ">=20"

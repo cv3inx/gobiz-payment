@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white" alt="Express" />
-  <img src="https://img.shields.io/badge/SQLite-node%3Asqlite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <img src="https://img.shields.io/badge/SQLite-better--sqlite3-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
   <img src="https://img.shields.io/badge/API-GoBiz%20Merchant-00AED9?logoColor=white" alt="GoBiz API" />
   <img src="https://img.shields.io/badge/docs-Swagger-85EA2D?logo=swagger&logoColor=black" alt="Swagger" />
   <a href="https://pay.violetics.pw/docs"><img src="https://img.shields.io/badge/demo-pay.violetics.pw-6f42c1" alt="Demo" /></a>
@@ -28,21 +28,25 @@ Dibangun di atas library GoBiz dari [**kavionn/gobiz-payment**](https://github.c
 
 - 🧾 **Create payment** — 1 endpoint, QRIS dinamis + gambar PNG langsung (tanpa upload eksternal)
 - 🔎 **Check by trxId** — cek status pakai ID transaksi kamu sendiri (atau auto `TRX-xxxx`)
-- 🪝 **Webhook otomatis** — begitu bayar masuk, callback ditembak (HMAC-SHA256, retry 3×)
+- 🪝 **Webhook durable** — callback ditembak saat lunas (HMAC-SHA256), di-persist di
+  SQLite + retry backoff, jadi consumer yang mati tetap kebagian event pas hidup lagi
 - 🔗 **Custom webhook per-trx** — `callbackUrl` di body meng-override `WEBHOOK_URL` global
 - 💰 **Fee manual** — `fee` ditambah ke `amount`; pembeli bayar `amountToPay`
 - 🆔 **Idempotency** — `Idempotency-Key` cegah double-charge saat retry
-- 🗄️ **SQLite** — transaksi persist di `data/transaction.db`, tahan restart
+- 🗄️ **SQLite (WAL)** — transaksi persist di `data/transaction.db`, tahan restart
 - 🛡️ **Security** — API key (timing-safe), rate limit per-IP, security headers
 - 📚 **Swagger UI** — dokumentasi interaktif di `/docs`
 - 📈 **Morgan** — log tiap request, satu baris berwarna
 - ♻️ **Watcher in-process** — polling jalan otomatis di dalam server, PM2 jaga tetap hidup
+- 💓 **Session keepalive** — sesi GoBiz dicek tiap 30s, token expired di-refresh
+  otomatis, status kelihatan di `/health` (503 kalau sesi mati)
 
 ---
 
 ## 📦 Instalasi
 
-Butuh **Node.js ≥ 22** (pakai `node:sqlite` bawaan — tanpa dependency SQLite).
+Butuh **Node.js ≥ 20**. SQLite lewat `better-sqlite3` (native binding, di-build
+saat `npm install` — butuh build tools di beberapa OS).
 
 ```bash
 git clone https://github.com/cv3inx/gobiz-payment.git
@@ -87,34 +91,37 @@ paste hasilnya ke `.env`.
 
 ## ⚙️ Konfigurasi (`.env`)
 
+Cuma **4 baris wajib** — sisanya ada default:
+
 ```env
-# Kredensial GoBiz — Opsi A (email/password) ATAU Opsi B (token)
-GOPAY_EMAIL=email@merchant.com
-GOPAY_PASSWORD=password_kamu
-# Opsi B: token dari F12 → Cookies → access_token
-GOPAY_ACCESS_TOKEN=
-GOPAY_MERCHANT_ID=
-
-# QRIS statis merchant (wajib)
-QRIS_STRING=00020101021226...
-
-# Gateway
-PORT=3000
-POLL_MS=7000          # interval cek pembayaran (ms) — jangan < 7000
-EXPIRE_MINUTES=5      # umur transaksi default (menit)
-RATE_MAX=60           # max request per IP per menit
-DB_FILE=              # default ./data/transaction.db
-
-# Webhook default (bisa di-override per-trx via callbackUrl)
-WEBHOOK_URL=https://app-kamu.com/webhook
-WEBHOOK_SECRET=ganti-ini-random-panjang
-
-# Proteksi endpoint tulis (kosongkan = nonaktif)
-API_KEY=
+GOPAY_EMAIL="email@merchant.com"
+GOPAY_PASSWORD="password-kamu"
+QRIS_STRING="00020101021226..."
+WEBHOOK_URL="https://app-kamu.com/webhook"
+WEBHOOK_SECRET="ganti-ini-random-panjang"
 ```
 
-`.gopay_cache.json` dibuat otomatis (menyimpan token + merchant ID), token
-di-refresh otomatis. Jangan commit `.env`, `.gopay_cache.json`, `transaction.db`.
+Yang sering dipakai (opsional):
+
+| Var | Default | Fungsi |
+|-----|---------|--------|
+| `API_KEY` | *(kosong)* | Proteksi endpoint tulis. **Kosong = siapa aja bisa bikin transaksi** |
+| `PUBLIC_URL` | dari request | Domain publik buat `qrImageUrl` absolut |
+| `PORT` | `3000` | Port server |
+| `EXPIRE_MINUTES` | `5` | Umur transaksi (menit) |
+| `TRUST_PROXY` | `1` | Hop reverse proxy yg dipercaya. Jangan `true` |
+| `GOPAY_ACCESS_TOKEN` | *(kosong)* | Pakai token browser, ganti email/password |
+
+Sisanya (`POLL_MS`, `SESSION_CHECK_MS`, `UNIQUE_CODE_MAX`, `RATE_MAX`, `MAX_AMOUNT`,
+`WEBHOOK_*`, `DB_FILE`) sudah aman defaultnya — lihat [.env.example](.env.example)
+kalau mau tuning. **Jangan turunin `POLL_MS`/`SESSION_CHECK_MS`**, risiko akun diblokir.
+
+Server ngasih warning saat boot kalau `API_KEY` kosong, `TRUST_PROXY=true`, atau
+polling terlalu agresif. Kalau `NODE_ENV=production` dan `WEBHOOK_SECRET` masih
+`change-me`, server **nolak jalan**.
+
+`data/gopay_cache.json` dibuat otomatis (nyimpen token + merchant ID), token
+di-refresh otomatis. Jangan commit `.env`, `data/`, `*.db`.
 
 ---
 
@@ -122,7 +129,7 @@ di-refresh otomatis. Jangan commit `.env`, `.gopay_cache.json`, `transaction.db`
 
 ```bash
 npm start          # jalan biasa
-npm test           # self-check (QRIS, DB, security)
+npm test           # semua suite (qris, uniqueCode, db, security, api)
 ```
 
 Buka **`http://localhost:3000/docs`** untuk Swagger UI interaktif.
@@ -160,9 +167,10 @@ Detail lengkap: [docs/API.md](docs/API.md) atau Swagger di `/docs`.
 | GET | `/payment/:trxId` | — | Cek status by trxId |
 | GET | `/payment/:trxId/qr.png` | — | Gambar QRIS (PNG) |
 | POST | `/payment/:trxId/cancel` | 🔑 | Batalkan (expire manual) |
+| POST | `/payment/:trxId/replay-webhook` | 🔑 | Kirim ulang webhook yg gagal total |
 | GET | `/payments` | 🔑 | List transaksi (paginated) |
 | GET | `/history` | 🔑 | History transaksi GoBiz (arsip + `?matched=`) |
-| GET | `/health` | — | Health + counts |
+| GET | `/health` | — | Counts + status sesi GoBiz (`503` kalau sesi mati) |
 
 🔑 = butuh `X-API-Key: <API_KEY>` kalau `API_KEY` diset.
 
@@ -191,10 +199,10 @@ Body — cuma `amount` yang wajib:
 | `expireMinutes` | ❌ | Kadaluarsa (menit). Default 5 |
 | `metadata` | ❌ | Data bebas, dikembalikan di webhook |
 
-Respons berisi **`amountToPay`** = `amount + fee + uniqueCode` (kode random 1..999
-yang **selalu** ditambah). **Itu satu-satunya angka yang dibayar pembeli** dan yang
-dicocokkan gateway. Tampilkan `amountToPay`, bukan `amount`. Contoh: `amount 100` +
-`uniqueCode 52` → pembeli bayar `152`.
+Respons berisi **`amountToPay`** = `amount + fee + uniqueCode`, dengan `uniqueCode`
+berurutan 1..99 (lihat [Cara matching](#-cara-matching-penting)). **Itu satu-satunya
+angka yang dibayar pembeli** dan yang dicocokkan gateway. Tampilkan `amountToPay`,
+bukan `amount`. Contoh: `amount 100` + `uniqueCode 52` → pembeli bayar `152`.
 
 ### Webhook
 
@@ -222,30 +230,78 @@ Header `X-Signature` = `HMAC-SHA256(WEBHOOK_SECRET, rawBody)`. Verifikasi pakai
 ## 🧠 Cara matching (penting)
 
 API GoBiz cuma melaporkan **nominal** pembayaran masuk — tidak ada cara menautkan
-`trxId` kita ke transfer pembeli. Jadi gateway bikin tiap `amountToPay` **unik**:
-`amount + fee` lalu tambah offset `0..99` rupiah kalau nominal itu sedang dipakai
-transaksi pending lain. Pembeli scan QR `amountToPay`, event pembayaran dicocokkan
-balik lewat nominal itu.
+`trxId` kita ke transfer pembeli. Jadi gateway kasih tiap transaksi pending nominal
+bayar yang **unik**: `amountToPay = amount + fee + uniqueCode`.
 
-**Konsekuensi:** `amountToPay` bisa lebih tinggi hingga 99 rupiah dari `amount + fee`.
-Selalu render QR + tampilkan `amountToPay`. Maks 100 transaksi pending boleh berbagi
-nominal dasar yang sama sebelum `/payment/create` balas `503`.
+`uniqueCode` dibagikan **berurutan**: 1, 2, 3 … sampai `UNIQUE_CODE_MAX` (default
+**99**), lalu balik lagi ke 1. Cursor-nya disimpan di SQLite, jadi restart lanjut
+dari kode terakhir — bukan mulai dari 1 lagi. Kode yang masih dipakai transaksi
+`PENDING` di nominal dasar yang sama otomatis dilewati.
+
+```
+trx 1 (amount 10000) → code 1  → bayar 10001
+trx 2 (amount 10000) → code 2  → bayar 10002
+trx 3 (amount 25000) → code 3  → bayar 25003   ← cursor lanjut, beda amount
+...
+trx 99               → code 99 → bayar  ...99
+trx 100              → code 1  → wrap balik ke 1
+```
+
+**Konsekuensi:** `amountToPay` bisa lebih tinggi sampai `UNIQUE_CODE_MAX` rupiah
+dari `amount + fee`. Selalu render QR + tampilkan `amountToPay`, jangan `amount`.
+Maksimal `UNIQUE_CODE_MAX` transaksi pending boleh berbagi nominal dasar yang sama;
+lewat itu `/payment/create` balas `503`.
 
 ---
 
 ## 🧩 Struktur
 
 ```
-server.js             Express gateway + wiring watcher (entry point)
-lib/gobiz.js          library GoBiz (auth, history, watcher) — dari kavionn
-src/db.js             SQLite (node:sqlite)
-src/security.js       API key, rate limit, headers, HMAC, SSRF guard
-src/openapi.js        spec OpenAPI untuk Swagger UI
-src/server.test.js    self-check
-data/transaction.db   database SQLite (dibuat otomatis)
-docs/API.md           dokumentasi API lengkap
-ecosystem.config.cjs  konfigurasi PM2
-demo.js               demo QRIS end-to-end (CLI, tanpa server)
+server.js                  entry point: boot, watcher wiring, graceful shutdown
+lib/gobiz.js               library GoBiz (auth, history, watcher) — dari kavionn
+
+src/
+  config.js                parsing env + validasi startup
+  app.js                   wiring Express (middleware + routes)
+  qris.js                  CRC16 + QRIS dinamis
+  uniqueCode.js            allocator kode berurutan (1..max, wrap)
+  logger.js                leveled logger (badge + warna, auto-plain di PM2)
+  security.js              API key, rate limit, headers, HMAC, SSRF guard
+  openapi.js               spec OpenAPI untuk Swagger UI
+  db/
+    index.js               koneksi SQLite + schema + migrasi
+    transactions.js        query transaksi
+    history.js             arsip transaksi GoBiz
+    webhooks.js            state pengiriman webhook
+    meta.js                key-value (cursor uniqueCode)
+  services/
+    payments.js            create, expire, markPaid, reconcile
+    webhooks.js            pengiriman + retry sweeper
+    session.js             keepalive + health check sesi GoBiz
+  routes/
+    payments.js            /payment/*, /payments
+    history.js             /history
+    system.js              /docs, /openapi.json, /health
+
+tests/                     suite per modul (node tests/run.js)
+data/transaction.db        database SQLite (dibuat otomatis)
+docs/API.md                dokumentasi API lengkap
+ecosystem.config.cjs       konfigurasi PM2
+demo.js                    demo QRIS end-to-end (CLI, tanpa server)
+```
+
+Alur satu pembayaran:
+
+```
+POST /payment/create
+  → routes/payments.js    validasi input
+  → services/payments.js  allocate code → build QRIS → simpan
+  → db/transactions.js
+
+pembeli bayar
+  → lib/gobiz.js          watcher polling history GoBiz
+  → services/payments.js  reconcile: cocokin nominal → markPaid
+  → services/webhooks.js  queue + kirim webhook (retry kalau gagal)
 ```
 
 ---

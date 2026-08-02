@@ -29,16 +29,35 @@ cluster mode — duplicate pollers would double-fire webhooks.
 ## How matching works (read this)
 
 Upstream GoPay history reports **only the amount** of an incoming payment — there
-is no way to attach our own `trxId` to the payer's transfer. So the gateway adds a
-random **unique code** (`1..UNIQUE_CODE_MAX`, default 999 rupiah) to every payment:
-`amountToPay = amount + fee + uniqueCode`. That code is *always* present, so the
-payer transfers a slightly-off figure the gateway can match back to exactly one
-pending transaction. Example: `amount 100` → `uniqueCode 52` → payer pays `152`.
+is no way to attach our own `trxId` to the payer's transfer. So every pending
+transaction gets a unique payable figure: `amountToPay = amount + fee + uniqueCode`.
+The payer transfers that slightly-off amount, which the gateway matches back to
+exactly one pending transaction.
+
+Codes are handed out **sequentially** — 1, 2, 3 … `UNIQUE_CODE_MAX` (default 99),
+then wrapping back to 1:
+
+| Transaction | amount | uniqueCode | amountToPay |
+|-------------|--------|-----------|-------------|
+| 1           | 10000  | 1         | 10001       |
+| 2           | 10000  | 2         | 10002       |
+| 3           | 25000  | 3         | 25003       |
+| …           |        |           |             |
+| 99          | 10000  | 99        | 10099       |
+| 100         | 10000  | 1         | 10001 *(wrapped)* |
+
+The cursor is persisted in SQLite, so a restart continues from the last code
+instead of replaying from 1. A code still held by a `PENDING` transaction at the
+same base amount is skipped, so two open orders never share a payable amount.
+Legacy rows created before codes were recorded are still avoided — the allocator
+also checks the payable amount itself, not just the code.
 
 **Consequence:** `amountToPay` is up to `UNIQUE_CODE_MAX` rupiah higher than
 `amount + fee`. Always render the QR for `amountToPay` and show that figure to the
-payer. Up to `UNIQUE_CODE_MAX` transactions may share the same base amount while
-pending before `POST /payment/create` returns `503`.
+payer. Up to `UNIQUE_CODE_MAX` transactions may share one base amount while pending;
+beyond that `POST /payment/create` returns `503`.
+
+`GET /health` exposes `uniqueCodeCursor` so you can see where the sequence is.
 
 ## Auth
 
@@ -102,7 +121,7 @@ Response `201`:
 }
 ```
 
-`amountToPay` = `amount` + `fee` + `uniqueCode` (random 1..999). It is the **one
+`amountToPay` = `amount` + `fee` + `uniqueCode` (sequential 1..99). It is the **one
 number the payer transfers** and the value the gateway matches on. `amount` and
 `fee` are informational.
 
@@ -120,12 +139,56 @@ Manually expire a `PENDING` transaction. `409` if not pending.
 
 ### `GET /payments?status=&limit=&offset=`
 
-List transactions, newest first. `status` optional (`PENDING`/`PAID`/`EXPIRED`),
-`limit` ≤ 200 (default 50).
+List transactions, newest first. `status` optional (`PENDING`/`PAID`/`EXPIRED`,
+anything else → `400`). `limit` clamped to 1..200 (default 50), `offset` ≥ 0.
 
 ### `GET /health`
 
-`{ success, data: { pending, total } }`.
+```json
+{
+  "success": true,
+  "data": {
+    "pending": 3,
+    "total": 128,
+    "webhooksOwed": 0,
+    "uniqueCodeCursor": 37,
+    "session": {
+      "ok": true,
+      "lastCheckAt": "2026-07-10T12:30:00.000Z",
+      "lastOkAt": "2026-07-10T12:30:00.000Z",
+      "consecutiveFailures": 0,
+      "reauths": 2,
+      "lastError": null
+    }
+  }
+}
+```
+
+- `webhooksOwed` > 0 — events queued for redelivery, usually a consumer that is down.
+- `uniqueCodeCursor` — last unique code handed out.
+- `session` — GoBiz upstream session, probed every `SESSION_CHECK_MS` (default 30s).
+  `reauths` counts how often the token was silently refreshed.
+
+Returns **`503`** with `success: false` when `session.ok` is `false`. Payments cannot
+be detected without a live GoBiz session, so the instance is genuinely degraded even
+though HTTP still works — point your load balancer or uptime monitor at this.
+
+## Session keepalive
+
+The payment watcher polls GoBiz every `POLL_MS`, so the session never goes idle. On
+top of that a cheap probe (a 1-record merchant lookup, not a history fetch) runs
+every `SESSION_CHECK_MS` to:
+
+- detect an expired token **before** a payment poll trips over it,
+- re-authenticate automatically when it has expired,
+- expose the result on `/health` instead of burying it in logs.
+
+A failed login puts GoBiz into a ~15 minute cooldown; during that window the probe
+logs at `info` and keeps `/health` at `503` rather than hammering the endpoint.
+
+> Do not lower `SESSION_CHECK_MS` or `POLL_MS` below their defaults — aggressive
+> polling of GoBiz's internal API risks the merchant account being blocked. The
+> server warns at boot if you do.
 
 ## Webhook
 
@@ -145,7 +208,31 @@ On `PAID` or `EXPIRED` the gateway POSTs to `callbackUrl` (or `WEBHOOK_URL`):
 }
 ```
 
-Header `X-Signature` = `HMAC-SHA256(WEBHOOK_SECRET, rawBody)`. Retried up to 3×.
+Header `X-Signature` = `HMAC-SHA256(WEBHOOK_SECRET, rawBody)`. Each attempt is
+capped at `WEBHOOK_TIMEOUT_MS` (default 10s).
+
+**Delivery is durable.** The owed webhook is written to SQLite before the first
+send, so it survives both a consumer outage and a gateway restart. Failures retry
+with exponential backoff (30s, 1m, 2m … capped at `WEBHOOK_MAX_BACKOFF_MS`) up to
+`WEBHOOK_MAX_ATTEMPTS` (default 12 ≈ 2 hours of downtime). A consumer returning
+after an `ECONNREFUSED` window still receives its event.
+
+Delivery state is visible on every transaction response and in `/health`
+(`webhooksOwed`):
+
+```json
+"webhook": { "state": "PENDING", "attempts": 3, "nextAttemptAt": "...", "lastError": "ECONNREFUSED" }
+```
+
+### `POST /payment/:trxId/replay-webhook`
+
+Re-queue a webhook that exhausted its attempts (consumer was down longer than the
+retry window). Resets the counter; the sweeper delivers on its next pass. `409` if
+the transaction is still `PENDING`.
+
+Exactly one webhook fires per transaction: the `PAID` and `EXPIRED` paths both
+settle through a `status = 'PENDING'` guard in SQLite, so a payment landing as the
+expiry timer fires produces one event, not two.
 
 ### Verifying (consumer side)
 
@@ -173,17 +260,26 @@ Envelope: `{ "success": false, "error": "message" }`.
 
 | Code | Meaning                                      |
 |------|----------------------------------------------|
-| 400  | Bad input (`amount`/`fee`/`callbackUrl`)     |
+| 400  | Bad input (`amount`/`fee`/`callbackUrl`/`status`), malformed or oversized JSON |
 | 401  | Missing/invalid API key                      |
-| 404  | Unknown `trxId`                              |
+| 404  | Unknown `trxId` or unknown route             |
 | 409  | Cancel on non-pending transaction            |
 | 429  | Rate limited (`RATE_MAX`/min per IP)         |
+| 500  | Unexpected internal error (details in logs, never in the response) |
 | 503  | No free amount slot / slot race — retry      |
+
+`amount` and `fee` must each be ≤ `MAX_AMOUNT` (default Rp 1,000,000,000).
 
 ## Security notes
 
-- Set `WEBHOOK_SECRET` and `API_KEY` to strong random values in production.
-- Put the gateway behind HTTPS (reverse proxy); `trust proxy` is on for real client IPs.
+- Set `WEBHOOK_SECRET` and `API_KEY` to strong random values in production. With
+  `NODE_ENV=production` the server **refuses to boot** while `WEBHOOK_SECRET` is
+  still the default `change-me`; a missing `API_KEY` logs a warning (write
+  endpoints are open).
+- Put the gateway behind HTTPS (reverse proxy). `trust proxy` trusts `TRUST_PROXY`
+  hops of `X-Forwarded-For` (default `1`). Do not set it to `true` — that takes
+  the client's own XFF at face value, letting anyone forge an IP and evade the
+  per-IP rate limit. Match it to your actual number of proxies.
 - SQLite file `transaction.db` holds transaction history — back it up, keep it off public paths.
 - State survives restarts; pending expiry timers are rebuilt on boot.
 - `callbackUrl` is SSRF-guarded: only http/https, no credentials, no internal/private

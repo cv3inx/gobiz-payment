@@ -14,7 +14,10 @@ data/*
 *.db-journal
 *.db-wal
 *.db-shm
-    
+
+# Knowledge-graph artifacts (graphify)
+graphify-out/
+
 # Logs
 *.log
 npm-debug.log*
