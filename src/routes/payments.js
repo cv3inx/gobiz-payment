@@ -42,6 +42,16 @@ function parseCreateBody(body = {}, headers) {
       if (!check.ok) return { error: check.error };
    }
 
+   // Optional per-transaction signing secret. Signs only this transaction's
+   // webhooks instead of the global WEBHOOK_SECRET. Never echoed back.
+   let callbackSecret = null;
+   if (body.callbackSecret != null) {
+      callbackSecret = String(body.callbackSecret);
+      if (callbackSecret.length < 8 || callbackSecret.length > 256) {
+         return { error: 'callbackSecret must be 8-256 chars' };
+      }
+   }
+
    let trxId = null;
    if (body.trxId != null) {
       trxId = String(body.trxId);
@@ -56,6 +66,7 @@ function parseCreateBody(body = {}, headers) {
          fee,
          expireMinutes,
          callbackUrl,
+         callbackSecret,
          trxId,
          metadata: body.metadata ?? null,
          idempotencyKey: headers['idempotency-key'] || body.idempotencyKey || null,

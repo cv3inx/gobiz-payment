@@ -65,6 +65,7 @@ for (const [column, ddl] of [
    ['webhookNextAt', `ALTER TABLE transactions ADD COLUMN webhookNextAt TEXT`],
    ['webhookLastError', `ALTER TABLE transactions ADD COLUMN webhookLastError TEXT`],
    ['uniqueCode', `ALTER TABLE transactions ADD COLUMN uniqueCode INTEGER`],
+   ['callbackSecret', `ALTER TABLE transactions ADD COLUMN callbackSecret TEXT`],
 ]) {
    if (!columns('transactions').includes(column)) db.exec(ddl);
 }

@@ -97,6 +97,33 @@ await new Promise((r) => setTimeout(r, 800)); // replay delivers out-of-band
 results.afterReplay = await call('GET', `/payment/${trxId}`);
 consumer.close();
 
+// A per-transaction callbackSecret must sign that transaction's webhook instead of
+// the global secret, and must never be echoed back in any response.
+// The consumer listens on the same port as WEBHOOK_URL: a caller-supplied
+// callbackUrl pointing at loopback is (correctly) refused by the SSRF guard.
+let perTrx = null;
+const secretConsumer = http.createServer((req, res) => {
+   let raw = '';
+   req.on('data', (c) => (raw += c));
+   req.on('end', () => {
+      perTrx = {
+         signedWithPerTrx: verifyWebhookSignature(raw, req.headers['x-signature'], 'per-trx-secret-123'),
+         signedWithGlobal: verifyWebhookSignature(raw, req.headers['x-signature'], 'test-secret'),
+         body: raw,
+      };
+      res.writeHead(200).end('ok');
+   });
+});
+await new Promise((r) => secretConsumer.listen(45997, '127.0.0.1', r));
+
+results.secretShort = await create({ amount: 100, callbackSecret: 'short' });
+results.secretCreate = await create({ amount: 4242, callbackSecret: 'per-trx-secret-123' });
+const secretTrxId = results.secretCreate.body.data?.trxId;
+await call('POST', `/payment/${secretTrxId}/cancel`);
+await new Promise((r) => setTimeout(r, 600));
+results.secretStatus = await call('GET', `/payment/${secretTrxId}`);
+secretConsumer.close();
+
 // /health must report a dead upstream session, so a load balancer can react.
 const { check: checkSession } = await import('../src/services/session.js');
 const brokenMerchant = {
@@ -170,6 +197,20 @@ test('status, QR image, and health all respond', () => {
    assert.ok(typeof results.health.body.data.uniqueCodeCursor === 'number');
    assert.ok(results.health.body.data.session, 'reports session health');
    assert.strictEqual(results.history.status, 200);
+});
+
+test('a per-transaction callbackSecret signs that webhook, not the global secret', () => {
+   assert.strictEqual(results.secretCreate.status, 201);
+   assert.ok(perTrx, 'webhook delivered');
+   assert.ok(perTrx.signedWithPerTrx, 'signature verifies with the per-trx secret');
+   assert.ok(!perTrx.signedWithGlobal, 'global secret must NOT verify it');
+});
+
+test('callbackSecret is never echoed back and is length-checked', () => {
+   assert.ok(!('callbackSecret' in results.secretCreate.body.data), 'absent from create response');
+   assert.ok(!('callbackSecret' in results.secretStatus.body.data), 'absent from status response');
+   assert.ok(!perTrx.body.includes('per-trx-secret-123'), 'absent from the webhook payload');
+   assert.strictEqual(results.secretShort.status, 400, 'rejects a secret under 8 chars');
 });
 
 test('health degrades to 503 when the GoBiz session is down', () => {

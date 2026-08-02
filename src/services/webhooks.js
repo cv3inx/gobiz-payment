@@ -27,12 +27,15 @@ export function buildPayload(trx) {
 /** Single POST attempt. Never throws — returns why it failed instead. */
 async function post(url, trx) {
    const body = JSON.stringify(buildPayload(trx));
+   // A per-transaction secret (set at create time) signs only that transaction's
+   // deliveries, so a caller can verify with their own key.
+   const secret = trx.callbackSecret || config.webhook.secret;
    try {
       const res = await fetch(url, {
          method: 'POST',
          headers: {
             'Content-Type': 'application/json',
-            'X-Signature': signBody(body, config.webhook.secret),
+            'X-Signature': signBody(body, secret),
          },
          body,
          // Without a timeout a black-holed consumer hangs this promise forever.

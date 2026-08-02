@@ -72,7 +72,7 @@ function scheduleExpiry(trx) {
  * and schedule expiry.
  * @throws {Error & { code: 'NO_FREE_CODE' | 'DUPLICATE' }}
  */
-export function create({ amount, fee = 0, trxId, callbackUrl = null, expireMinutes, metadata = null, idempotencyKey = null }) {
+export function create({ amount, fee = 0, trxId, callbackUrl = null, callbackSecret = null, expireMinutes, metadata = null, idempotencyKey = null }) {
    const total = amount + fee;
    const { code, payAmount } = allocate(total, {
       max: config.uniqueCodeMax,
@@ -90,6 +90,7 @@ export function create({ amount, fee = 0, trxId, callbackUrl = null, expireMinut
       uniqueCode: code,
       qrString: buildDynamicQris(config.qrisString, payAmount),
       callbackUrl,
+      callbackSecret,
       idempotencyKey,
       metadata,
       createdAt: new Date().toISOString(),

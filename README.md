@@ -196,6 +196,7 @@ Body — cuma `amount` yang wajib:
 | `fee` | ❌ | Biaya admin, ditambah ke amount. Default 0 |
 | `trxId` | ❌ | ID order kamu. Kosong = auto `TRX-xxxx` |
 | `callbackUrl` | ❌ | Webhook khusus trx ini, override `.env` |
+| `callbackSecret` | ❌ | Secret khusus trx ini (8-256 char) buat tanda tangan webhook. Ga pernah dikembalikan di response |
 | `expireMinutes` | ❌ | Kadaluarsa (menit). Default 5 |
 | `metadata` | ❌ | Data bebas, dikembalikan di webhook |
 

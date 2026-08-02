@@ -1,13 +1,14 @@
 import { db } from './index.js';
 
 const COLUMNS = `trxId, status, amount, fee, total, payAmount, uniqueCode, qrString,
-   callbackUrl, idempotencyKey, metadata, createdAt, expiresAt, paidAt, entry`;
+   callbackUrl, callbackSecret, idempotencyKey, metadata, createdAt, expiresAt, paidAt, entry`;
 
 const stmt = {
    insert: db.prepare(`
       INSERT INTO transactions (${COLUMNS})
       VALUES (:trxId, :status, :amount, :fee, :total, :payAmount, :uniqueCode, :qrString,
-              :callbackUrl, :idempotencyKey, :metadata, :createdAt, :expiresAt, :paidAt, :entry)
+              :callbackUrl, :callbackSecret, :idempotencyKey, :metadata, :createdAt,
+              :expiresAt, :paidAt, :entry)
    `),
    get: db.prepare(`SELECT * FROM transactions WHERE trxId = ?`),
    byAmount: db.prepare(`SELECT * FROM transactions WHERE payAmount = ? AND status = 'PENDING'`),
@@ -56,6 +57,7 @@ export function insert(trx) {
       fee: trx.fee ?? 0,
       uniqueCode: trx.uniqueCode ?? null,
       callbackUrl: trx.callbackUrl ?? null,
+      callbackSecret: trx.callbackSecret ?? null,
       idempotencyKey: trx.idempotencyKey ?? null,
       metadata: trx.metadata != null ? JSON.stringify(trx.metadata) : null,
       paidAt: trx.paidAt ?? null,

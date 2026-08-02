@@ -83,6 +83,7 @@ Create a payment.
 | `fee`            | int    | no       | Added to amount (default 0), ≥ 0                    |
 | `trxId`          | string | no       | Custom ID (1-64 chars `[A-Za-z0-9_.-]`); auto `TRX-xxxx` if omitted; `409` if it already exists |
 | `callbackUrl`    | string | no       | Per-transaction webhook URL; overrides `WEBHOOK_URL`|
+| `callbackSecret` | string | no       | 8-256 chars. Signs **this** transaction's webhooks instead of `WEBHOOK_SECRET`. Never returned in any response |
 | `expireMinutes`  | int    | no       | Lifetime in minutes (default `EXPIRE_MINUTES`, 5)  |
 | `metadata`       | any    | no       | Echoed back in status + webhook                    |
 | `idempotencyKey` | string | no       | Also accepted via `Idempotency-Key` header         |
@@ -208,8 +209,9 @@ On `PAID` or `EXPIRED` the gateway POSTs to `callbackUrl` (or `WEBHOOK_URL`):
 }
 ```
 
-Header `X-Signature` = `HMAC-SHA256(WEBHOOK_SECRET, rawBody)`. Each attempt is
-capped at `WEBHOOK_TIMEOUT_MS` (default 10s).
+Header `X-Signature` = `HMAC-SHA256(secret, rawBody)`, where `secret` is the
+transaction's own `callbackSecret` if one was set at create time, else the global
+`WEBHOOK_SECRET`. Each attempt is capped at `WEBHOOK_TIMEOUT_MS` (default 10s).
 
 **Delivery is durable.** The owed webhook is written to SQLite before the first
 send, so it survives both a consumer outage and a gateway restart. Failures retry
