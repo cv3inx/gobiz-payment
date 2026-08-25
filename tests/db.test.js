@@ -9,6 +9,27 @@ const webhooks = await import('../src/db/webhooks.js');
 
 const { test, report } = createSuite('db');
 
+test('the connection string is forced to verify-full', () => {
+   // pg v9 redefines sslmode=require as "encrypt, do not verify". This connection
+   // carries transaction rows and the GoBiz access token, so it must keep verifying
+   // the certificate after that change lands.
+   const f = db.withVerifiedSsl;
+   const mode = (u) => new URL(f(u)).searchParams.get('sslmode');
+   assert.strictEqual(mode('postgres://u:p@h/db?sslmode=require'), 'verify-full');
+   assert.strictEqual(mode('postgres://u:p@h/db?sslmode=prefer'), 'verify-full');
+   assert.strictEqual(mode('postgres://u:p@h/db?sslmode=verify-ca'), 'verify-full');
+   assert.strictEqual(mode('postgres://u:p@h/db?sslmode=verify-full'), 'verify-full');
+   // An explicit opt-out is left alone — that is a local server's business.
+   assert.strictEqual(mode('postgres://u:p@h/db?sslmode=disable'), 'disable');
+   // Other params must survive: channel_binding is what Neon's URL also carries.
+   assert.strictEqual(
+      new URL(f('postgres://u:p@h/db?channel_binding=require&sslmode=require'))
+         .searchParams.get('channel_binding'),
+      'require',
+   );
+   assert.strictEqual(f('not a url'), 'not a url', 'unparseable input passes through');
+});
+
 test('round-trips a transaction with JSON columns', async () => {
    const trx = makeTrx({ payAmount: 3001, uniqueCode: 1 });
    await transactions.insert(trx);

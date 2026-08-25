@@ -15,6 +15,31 @@
 let client = null;
 let connecting = null;
 
+/**
+ * Force `sslmode=verify-full` on the connection string.
+ *
+ * `sslmode=require` currently means "verify fully" in pg, but v9 changes it to
+ * libpq semantics — encrypt without verifying — which would silently downgrade
+ * this connection. Saying `verify-full` outright is future-proof, and it also
+ * silences pg's deprecation warning about exactly that change.
+ *
+ * Rewritten here rather than in DATABASE_URL because that variable is injected by
+ * the Neon integration; editing it by hand would be undone the next time the
+ * integration rotates credentials.
+ */
+export function withVerifiedSsl(raw) {
+   try {
+      const url = new URL(raw);
+      const mode = url.searchParams.get('sslmode');
+      if (mode && mode !== 'disable' && mode !== 'verify-full') {
+         url.searchParams.set('sslmode', 'verify-full');
+      }
+      return url.toString();
+   } catch {
+      return raw; // not a parseable URL — hand it over untouched and let pg complain
+   }
+}
+
 async function connect() {
    if (process.env.DATABASE_URL) {
       const { default: pg } = await import('pg');
@@ -22,7 +47,7 @@ async function connect() {
       // rupiah amount well under 2^53, so reading it as a Number is safe.
       pg.types.setTypeParser(20, Number);
       const pool = new pg.Pool({
-         connectionString: process.env.DATABASE_URL,
+         connectionString: withVerifiedSsl(process.env.DATABASE_URL),
          // One connection per instance. Serverless spawns many instances, so a
          // per-instance pool of 2+ multiplies into pooler exhaustion.
          // ponytail: point DATABASE_URL at a transaction-mode pooler
@@ -30,9 +55,20 @@ async function connect() {
          max: 1,
          idleTimeoutMillis: 10_000,
          connectionTimeoutMillis: 10_000,
+         // Verify the server certificate. This connection carries transaction rows
+         // and the GoBiz access token, so encrypted-but-unauthenticated is not
+         // good enough — without this, anything able to intercept the path could
+         // present its own certificate.
+         //
+         // Belt and braces with withVerifiedSsl() above: this option wins over the
+         // URL's `sslmode`, so verification holds even if that string changes.
+         //
+         // Managed Postgres (Neon, Supabase) serves a publicly-trusted cert, so no
+         // custom CA is needed. A self-hosted server with a private CA needs
+         // `ca:` here instead of turning verification off.
          ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL)
             ? false
-            : { rejectUnauthorized: false },
+            : { rejectUnauthorized: true },
       });
       return pool;
    }
