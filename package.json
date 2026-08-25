@@ -1,22 +1,16 @@
 {
   "name": "gobiz-payment",
   "version": "1.0.0",
-  "description": "Self-hosted QRIS payment gateway di atas GoBiz (GoPay Merchant) — QRIS dinamis, matching pembayaran otomatis, webhook bertanda tangan.",
+  "description": "Self-hosted QRIS payment gateway di atas GoBiz (GoPay Merchant) \u2014 QRIS dinamis, matching pembayaran otomatis, webhook bertanda tangan.",
   "private": true,
   "type": "module",
-  "main": "server.js",
-  "exports": {
-    ".": "./server.js",
-    "./lib/gobiz.js": "./lib/gobiz.js",
-    "./src/security.js": "./src/security.js"
-  },
   "scripts": {
-    "start": "node server.js",
-    "test": "node tests/run.js",
-    "pm2:start": "pm2 start ecosystem.config.cjs",
-    "pm2:stop": "pm2 stop gobiz-payment",
-    "pm2:restart": "pm2 restart gobiz-payment",
-    "pm2:logs": "pm2 logs gobiz-payment"
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "migrate": "node scripts/migrate.js",
+    "test": "node tests/run.js"
   },
   "keywords": [
     "gopay",
@@ -26,19 +20,25 @@
     "merchant",
     "indonesia"
   ],
-  "author": "kavionn (lib/gobiz.js, demo.js), cv3inx (gateway layer)",
+  "author": "kavionn (lib/gobiz.js), cv3inx (gateway layer)",
   "license": "MIT",
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
     "crc": "^4.3.2",
     "dotenv": "^16.4.5",
     "express": "^4.22.2",
     "moment-timezone": "^0.5.45",
     "morgan": "^1.11.0",
+    "nuxt": "^4.5.2",
+    "pg": "^8.23.0",
     "qrcode": "^1.5.4",
-    "swagger-ui-express": "^5.0.1"
+    "swagger-ui-express": "^5.0.1",
+    "vue": "^3.5.41",
+    "vue-router": "^5.2.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.7"
   }
 }

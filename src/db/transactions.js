@@ -1,48 +1,25 @@
-import { db } from './index.js';
+import { all, one, changed } from './index.js';
 
-const COLUMNS = `trxId, status, amount, fee, total, payAmount, uniqueCode, qrString,
-   callbackUrl, callbackSecret, idempotencyKey, metadata, createdAt, expiresAt, paidAt, entry`;
+const COLS = `"trxId", status, amount, fee, total, "payAmount", "uniqueCode", "qrString",
+   "callbackUrl", "callbackSecret", "idempotencyKey", metadata, "createdAt", "expiresAt",
+   "paidAt", entry`;
 
-const stmt = {
-   insert: db.prepare(`
-      INSERT INTO transactions (${COLUMNS})
-      VALUES (:trxId, :status, :amount, :fee, :total, :payAmount, :uniqueCode, :qrString,
-              :callbackUrl, :callbackSecret, :idempotencyKey, :metadata, :createdAt,
-              :expiresAt, :paidAt, :entry)
-   `),
-   get: db.prepare(`SELECT * FROM transactions WHERE trxId = ?`),
-   byAmount: db.prepare(`SELECT * FROM transactions WHERE payAmount = ? AND status = 'PENDING'`),
-   byIdempotency: db.prepare(`SELECT * FROM transactions WHERE idempotencyKey = ?`),
-   pending: db.prepare(`SELECT * FROM transactions WHERE status = 'PENDING'`),
-   pendingCodes: db.prepare(`SELECT uniqueCode FROM transactions WHERE status = 'PENDING'`),
-   list: db.prepare(`
-      SELECT * FROM transactions
-      WHERE (:status IS NULL OR status = :status)
-      ORDER BY createdAt DESC LIMIT :limit OFFSET :offset
-   `),
-   // Guarded on PENDING: a transaction leaves PENDING exactly once, so a late
-   // expiry timer can never overwrite a PAID row (or vice versa).
-   settle: db.prepare(`
-      UPDATE transactions SET status = :status, paidAt = :paidAt, entry = :entry
-      WHERE trxId = :trxId AND status = 'PENDING'
-   `),
-   counts: db.prepare(`
-      SELECT
-         (SELECT COUNT(*) FROM transactions WHERE status = 'PENDING') AS pending,
-         (SELECT COUNT(*) FROM transactions) AS total,
-         (SELECT COUNT(*) FROM transactions WHERE webhookState = 'PENDING') AS webhooksOwed
-   `),
-};
-
+/**
+ * Rupiah columns are BIGINT so `amount + fee + code` can exceed INT4 without
+ * overflowing. Coerce here so callers always see plain numbers regardless of how
+ * the driver decodes int8.
+ */
 const parse = (row) => (row ? {
    ...row,
-   metadata: row.metadata ? JSON.parse(row.metadata) : null,
-   entry: row.entry ? JSON.parse(row.entry) : null,
+   amount: Number(row.amount),
+   fee: Number(row.fee),
+   total: Number(row.total),
+   payAmount: Number(row.payAmount),
+   uniqueCode: row.uniqueCode == null ? null : Number(row.uniqueCode),
 } : null);
 
 /**
- * Clamp pagination. SQLite treats a NEGATIVE limit as "no limit", so an
- * unclamped `?limit=-1` would dump the whole table.
+ * Clamp pagination so a caller cannot ask for the whole table.
  */
 export function clampPage({ limit, offset } = {}) {
    return {
@@ -51,41 +28,87 @@ export function clampPage({ limit, offset } = {}) {
    };
 }
 
-export function insert(trx) {
-   stmt.insert.run({
-      ...trx,
-      fee: trx.fee ?? 0,
-      uniqueCode: trx.uniqueCode ?? null,
-      callbackUrl: trx.callbackUrl ?? null,
-      callbackSecret: trx.callbackSecret ?? null,
-      idempotencyKey: trx.idempotencyKey ?? null,
-      metadata: trx.metadata != null ? JSON.stringify(trx.metadata) : null,
-      paidAt: trx.paidAt ?? null,
-      entry: trx.entry != null ? JSON.stringify(trx.entry) : null,
-   });
+/**
+ * Insert a transaction. Rejects with a PG unique-violation (code 23505) when the
+ * payable amount, idempotency key, or trxId is already taken.
+ */
+export async function insert(trx) {
+   await one(
+      `INSERT INTO transactions (${COLS}) VALUES
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING "trxId"`,
+      [
+         trx.trxId, trx.status, trx.amount, trx.fee ?? 0, trx.total, trx.payAmount,
+         trx.uniqueCode ?? null, trx.qrString, trx.callbackUrl ?? null,
+         trx.callbackSecret ?? null, trx.idempotencyKey ?? null,
+         trx.metadata != null ? JSON.stringify(trx.metadata) : null,
+         trx.createdAt, trx.expiresAt, trx.paidAt ?? null,
+         trx.entry != null ? JSON.stringify(trx.entry) : null,
+      ],
+   );
 }
 
-export const get = (trxId) => parse(stmt.get.get(trxId));
-export const getPendingByAmount = (payAmount) => parse(stmt.byAmount.get(payAmount));
-export const getByIdempotencyKey = (key) => parse(stmt.byIdempotency.get(key));
-export const listPending = () => stmt.pending.all().map(parse);
-export const counts = () => stmt.counts.get();
+export const get = async (trxId) =>
+   parse(await one(`SELECT * FROM transactions WHERE "trxId" = $1`, [trxId]));
 
-/** Unique codes currently held by pending transactions. */
-export const pendingCodes = () =>
-   stmt.pendingCodes.all().map((r) => r.uniqueCode).filter((c) => c != null);
+export const getPendingByAmount = async (payAmount) =>
+   parse(await one(
+      `SELECT * FROM transactions WHERE "payAmount" = $1 AND status = 'PENDING'`,
+      [payAmount],
+   ));
 
-export function list({ status = null, ...page } = {}) {
-   return stmt.list.all({ status, ...clampPage(page) }).map(parse);
+export const getByIdempotencyKey = async (key) =>
+   parse(await one(`SELECT * FROM transactions WHERE "idempotencyKey" = $1`, [key]));
+
+export const listPending = async () =>
+   (await all(`SELECT * FROM transactions WHERE status = 'PENDING'`)).map(parse);
+
+/** PENDING transactions already past their expiry — the cron sweep's work list. */
+export const listExpired = async (now = new Date().toISOString(), limit = 500) =>
+   (await all(
+      `SELECT * FROM transactions WHERE status = 'PENDING' AND "expiresAt" <= $1
+       ORDER BY "expiresAt" LIMIT $2`,
+      [now, limit],
+   )).map(parse);
+
+export async function list({ status = null, ...page } = {}) {
+   const { limit, offset } = clampPage(page);
+   const rows = await all(
+      `SELECT * FROM transactions
+       WHERE ($1::text IS NULL OR status = $1)
+       ORDER BY "createdAt" DESC LIMIT $2 OFFSET $3`,
+      [status, limit, offset],
+   );
+   return rows.map(parse);
 }
 
-/** Settle a PENDING transaction. Returns false if it was already settled. */
-export function settle(trx) {
-   const { changes } = stmt.settle.run({
-      trxId: trx.trxId,
-      status: trx.status,
-      paidAt: trx.paidAt ?? null,
-      entry: trx.entry != null ? JSON.stringify(trx.entry) : null,
-   });
-   return changes > 0;
+/**
+ * Settle a PENDING transaction. Returns false if it was already settled — the
+ * `status = 'PENDING'` guard means a transaction leaves PENDING exactly once, so
+ * a payment landing as the expiry sweep runs can never double-notify.
+ */
+export async function settle(trx) {
+   return await changed(
+      `UPDATE transactions SET status = $2, "paidAt" = $3, entry = $4
+       WHERE "trxId" = $1 AND status = 'PENDING'`,
+      [
+         trx.trxId,
+         trx.status,
+         trx.paidAt ?? null,
+         trx.entry != null ? JSON.stringify(trx.entry) : null,
+      ],
+   ) > 0;
 }
+
+export const counts = async () => {
+   const row = await one(`
+      SELECT
+         (SELECT COUNT(*) FROM transactions WHERE status = 'PENDING')            AS pending,
+         (SELECT COUNT(*) FROM transactions)                                     AS total,
+         (SELECT COUNT(*) FROM transactions WHERE "webhookState" = 'PENDING')    AS "webhooksOwed"
+   `);
+   return {
+      pending: Number(row.pending),
+      total: Number(row.total),
+      webhooksOwed: Number(row.webhooksOwed),
+   };
+};

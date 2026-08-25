@@ -1,22 +1,42 @@
 import assert from 'node:assert';
 import http from 'node:http';
-import { createSuite, useTempDatabase } from './helpers.js';
+import { createSuite, setupDatabase, useTempEnv } from './helpers.js';
 
 // A webhook consumer that is refusing connections, so delivery fails the way it
 // does in production (ECONNREFUSED) without any network access.
 const DEAD_CONSUMER = 'http://127.0.0.1:45997/hook';
-const { cleanup } = useTempDatabase({
+useTempEnv({
    API_KEY: 'test-key',
    WEBHOOK_URL: DEAD_CONSUMER,
-   WEBHOOK_SWEEP_MS: '300',
    UNIQUE_CODE_MAX: '99',
 });
 
-const { db } = await import('../src/db/index.js');
+const db = await setupDatabase();
 const { createApp } = await import('../src/app.js');
 const { verifyWebhookSignature } = await import('../src/security.js');
+const transactions = await import('../src/db/transactions.js');
 
-const server = createApp().listen(0);
+/**
+ * Stand-in for GoPayMerchant. `history` is the upstream feed the poller reads, so a
+ * test can make a payment "arrive" without touching the network.
+ */
+const upstream = { history: [], failNext: null };
+const merchant = {
+   token: 'tok',
+   _initialized: true,
+   _isTokenValid: async () => true,
+   init: async () => {},
+   getHistory: async () => {
+      if (upstream.failNext) {
+         const why = upstream.failNext;
+         upstream.failNext = null;
+         throw new Error(why);
+      }
+      return upstream.history;
+   },
+};
+
+const server = createApp({ merchant }).listen(0);
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 const AUTH = { 'Content-Type': 'application/json', 'X-API-Key': 'test-key' };
@@ -36,6 +56,16 @@ const call = async (method, path, { headers = AUTH, body } = {}) => {
 };
 
 const create = (body) => call('POST', '/payment/create', { body });
+/** There is no cron: this is the same cycle ordinary traffic drives. */
+const runCycle = () => call('POST', '/api/admin/poll');
+
+/** One upstream payin entry, shaped like lib/gobiz.js `getHistory` output. */
+const payin = (gobizId, amount) => ({
+   gobizId,
+   amount,
+   time: '01 Jan 2026 - 10:00:00',
+   raw: { transaction_id: gobizId, gross_amount: amount * 100, status: 'SETTLEMENT' },
+});
 
 const { test, report } = createSuite('api');
 const results = {};
@@ -48,12 +78,23 @@ results.badAmount = await create({ amount: 0 });
 results.hugeAmount = await create({ amount: 99_999_999_999 });
 results.badFee = await create({ amount: 100, fee: -1 });
 results.badExpire = await create({ amount: 100, expireMinutes: 0 });
+// A lifetime past the cap would overflow a 32-bit timer in any scheduler and
+// reserves one of only UNIQUE_CODE_MAX payable amounts indefinitely.
+results.hugeExpire = await create({ amount: 100, expireMinutes: 40_000 });
 results.ssrf = await create({ amount: 100, callbackUrl: 'http://169.254.169.254/x' });
 results.badTrxId = await create({ amount: 100, trxId: 'bad id!' });
 results.badStatus = await call('GET', '/payments?status=BOGUS');
 
+results.cycleNoAuth = await call('POST', '/api/admin/poll', { headers: {} });
+
+// The first cycle seeds: pre-existing upstream history must NOT be reconciled
+// against orders created later.
+upstream.history = [payin('GB-OLD-1', 5101), payin('GB-OLD-2', 7777)];
+results.cycleSeed = await runCycle();
+
 results.created = await create({ amount: 5000, fee: 100, metadata: { orderId: 1 } });
 const trxId = results.created.body.data?.trxId;
+const createdAmount = results.created.body.data?.amountToPay;
 
 results.duplicate = await create({ amount: 100, trxId });
 results.idem1 = await create({ amount: 7000, idempotencyKey: 'idem-1' });
@@ -68,13 +109,49 @@ results.list = await call('GET', '/payments?limit=-1');
 results.health = await call('GET', '/health');
 results.history = await call('GET', '/history');
 
-results.cancel = await call('POST', `/payment/${trxId}/cancel`);
-results.cancelAgain = await call('POST', `/payment/${trxId}/cancel`);
+// A payment arrives for the order created above. The consumer is still down, so
+// the PAID webhook must be recorded as owed rather than lost.
+upstream.history = [payin('GB-PAY-1', createdAmount), ...upstream.history];
+results.cyclePaid = await runCycle();
+results.afterPaid = await call('GET', `/payment/${trxId}`);
+results.historyMatched = await call('GET', '/history?matched=true');
 
-await new Promise((r) => setTimeout(r, 600)); // let delivery fail + record state
-results.afterFailedWebhook = await call('GET', `/payment/${trxId}`);
+// Re-running the same upstream feed must not reconcile the same payment twice.
+results.cycleReplay = await runCycle();
+
+// An unmatched payment is archived, not dropped.
+upstream.history = [payin('GB-ORPHAN', 999_777), ...upstream.history];
+results.cycleOrphan = await runCycle();
+results.historyUnmatched = await call('GET', '/history?matched=false');
+
+// A pending transaction whose expiry has passed while nothing was running: the
+// cycle sweep settles it, and a status read settles it on the spot.
+const shortLived = await create({ amount: 4100, expireMinutes: 1 });
+const shortId = shortLived.body.data.trxId;
+await transactions.settle; // no-op, keeps the import obviously used
+await db.sql(
+   `UPDATE transactions SET "expiresAt" = $1 WHERE "trxId" = $2`,
+   [new Date(Date.now() - 60_000).toISOString(), shortId],
+);
+results.lazyExpire = await call('GET', `/payment/${shortId}`);
+
+const sweptTrx = await create({ amount: 4300, expireMinutes: 1 });
+const sweptId = sweptTrx.body.data.trxId;
+await db.sql(
+   `UPDATE transactions SET "expiresAt" = $1 WHERE "trxId" = $2`,
+   [new Date(Date.now() - 60_000).toISOString(), sweptId],
+);
+results.cycleSweep = await runCycle();
+results.afterSweep = await call('GET', `/payment/${sweptId}`);
+
+// Upstream failing must not stop the sweep or webhook retries.
+upstream.failNext = 'HTTP Error Analytics: 503';
+results.cycleUpstreamDown = await runCycle();
+
+results.cancel = await call('POST', `/payment/${results.idem1.body.data.trxId}/cancel`);
+results.cancelAgain = await call('POST', `/payment/${results.idem1.body.data.trxId}/cancel`);
+results.afterFailedWebhook = await call('GET', `/payment/${results.idem1.body.data.trxId}`);
 results.replayUnknown = await call('POST', '/payment/NOPE/replay-webhook');
-results.replayPending = await call('POST', `/payment/${results.idem1.body.data.trxId}/replay-webhook`);
 
 // The consumer comes back up. Replaying now must deliver the queued event —
 // this is the production recovery path for a webhook that failed while it was down.
@@ -93,14 +170,11 @@ const consumer = http.createServer((req, res) => {
 await new Promise((r) => consumer.listen(45997, '127.0.0.1', r));
 
 results.replay = await call('POST', `/payment/${trxId}/replay-webhook`);
-await new Promise((r) => setTimeout(r, 800)); // replay delivers out-of-band
 results.afterReplay = await call('GET', `/payment/${trxId}`);
 consumer.close();
 
 // A per-transaction callbackSecret must sign that transaction's webhook instead of
 // the global secret, and must never be echoed back in any response.
-// The consumer listens on the same port as WEBHOOK_URL: a caller-supplied
-// callbackUrl pointing at loopback is (correctly) refused by the SSRF guard.
 let perTrx = null;
 const secretConsumer = http.createServer((req, res) => {
    let raw = '';
@@ -120,18 +194,16 @@ results.secretShort = await create({ amount: 100, callbackSecret: 'short' });
 results.secretCreate = await create({ amount: 4242, callbackSecret: 'per-trx-secret-123' });
 const secretTrxId = results.secretCreate.body.data?.trxId;
 await call('POST', `/payment/${secretTrxId}/cancel`);
-await new Promise((r) => setTimeout(r, 600));
 results.secretStatus = await call('GET', `/payment/${secretTrxId}`);
 secretConsumer.close();
 
-// /health must report a dead upstream session, so a load balancer can react.
+// /health must report a dead upstream session, so an uptime monitor can react.
 const { check: checkSession } = await import('../src/services/session.js');
-const brokenMerchant = {
+await checkSession({
    token: 'tok',
    _isTokenValid: async () => false,
    init: async () => { throw new Error('Login di-cooldown 900s'); },
-};
-await checkSession(brokenMerchant);
+});
 results.healthDegraded = await call('GET', '/health');
 
 await checkSession({ token: 'tok', _isTokenValid: async () => true, init: async () => {} });
@@ -151,14 +223,26 @@ test('missing API key is rejected', () => {
    assert.strictEqual(results.noKey.status, 401);
 });
 
-test('input validation rejects bad amounts, fees, and URLs', () => {
+test('the cycle endpoint refuses an unauthenticated caller', () => {
+   // Anyone able to drive this could hammer GoBiz until the account is blocked.
+   assert.strictEqual(results.cycleNoAuth.status, 401);
+});
+
+test('input validation rejects bad amounts, fees, expiries, and URLs', () => {
    assert.strictEqual(results.badAmount.status, 400, 'amount 0');
    assert.strictEqual(results.hugeAmount.status, 400, 'amount over MAX_AMOUNT');
    assert.strictEqual(results.badFee.status, 400, 'negative fee');
    assert.strictEqual(results.badExpire.status, 400, 'expireMinutes 0');
+   assert.strictEqual(results.hugeExpire.status, 400, 'expireMinutes past the cap');
    assert.strictEqual(results.ssrf.status, 400, 'SSRF callbackUrl');
    assert.strictEqual(results.badTrxId.status, 400, 'malformed trxId');
    assert.strictEqual(results.badStatus.status, 400, 'unknown status filter');
+});
+
+test('the first cycle seeds history instead of reconciling it', () => {
+   assert.strictEqual(results.cycleSeed.status, 200);
+   assert.strictEqual(results.cycleSeed.body.data.poll.seeded, true);
+   assert.strictEqual(results.cycleSeed.body.data.poll.matched, 0, 'nothing matched on a seed pass');
 });
 
 test('create returns a payable amount built from amount + fee + code', () => {
@@ -199,26 +283,47 @@ test('status, QR image, and health all respond', () => {
    assert.strictEqual(results.history.status, 200);
 });
 
-test('a per-transaction callbackSecret signs that webhook, not the global secret', () => {
-   assert.strictEqual(results.secretCreate.status, 201);
-   assert.ok(perTrx, 'webhook delivered');
-   assert.ok(perTrx.signedWithPerTrx, 'signature verifies with the per-trx secret');
-   assert.ok(!perTrx.signedWithGlobal, 'global secret must NOT verify it');
+test('a cycle reconciles a matching payment and marks it PAID', () => {
+   assert.strictEqual(results.cyclePaid.body.data.poll.matched, 1, 'one order matched');
+   assert.strictEqual(results.afterPaid.body.data.status, 'PAID');
+   assert.ok(results.afterPaid.body.data.paidAt, 'paidAt set');
+   const linked = results.historyMatched.body.data.find((h) => h.gobizId === 'GB-PAY-1');
+   assert.ok(linked, 'payment archived');
+   assert.strictEqual(linked.matchedTrxId, trxId, 'archive links back to the order');
 });
 
-test('callbackSecret is never echoed back and is length-checked', () => {
-   assert.ok(!('callbackSecret' in results.secretCreate.body.data), 'absent from create response');
-   assert.ok(!('callbackSecret' in results.secretStatus.body.data), 'absent from status response');
-   assert.ok(!perTrx.body.includes('per-trx-secret-123'), 'absent from the webhook payload');
-   assert.strictEqual(results.secretShort.status, 400, 'rejects a secret under 8 chars');
+test('re-seeing the same upstream payment does not reconcile it twice', () => {
+   assert.strictEqual(results.cycleReplay.body.data.poll.fresh, 0, 'already-archived ids are not fresh');
 });
 
-test('health degrades to 503 when the GoBiz session is down', () => {
-   assert.strictEqual(results.healthDegraded.status, 503, 'signals degraded to a load balancer');
-   assert.strictEqual(results.healthDegraded.body.success, false);
-   assert.strictEqual(results.healthDegraded.body.data.session.ok, false);
-   assert.match(results.healthDegraded.body.data.session.lastError, /cooldown/i);
-   assert.strictEqual(results.healthRecovered.status, 200, 'back to 200 once the session recovers');
+test('an unmatched payment is archived rather than dropped', () => {
+   assert.strictEqual(results.cycleOrphan.body.data.poll.fresh, 1);
+   assert.strictEqual(results.cycleOrphan.body.data.poll.matched, 0);
+   assert.ok(
+      results.historyUnmatched.body.data.some((h) => h.gobizId === 'GB-ORPHAN'),
+      'visible via ?matched=false for manual reconciliation',
+   );
+});
+
+test('an overdue transaction is settled on read', () => {
+   // No timer can fire in a frozen instance, so reading must not report PENDING
+   // for something that expired.
+   assert.strictEqual(results.lazyExpire.body.data.status, 'EXPIRED');
+});
+
+test('the cycle sweep expires overdue transactions', () => {
+   assert.ok(results.cycleSweep.body.data.expired >= 1, 'sweep reported an expiry');
+   assert.strictEqual(results.afterSweep.body.data.status, 'EXPIRED');
+});
+
+test('a failing upstream poll does not stop the rest of the cycle', () => {
+   assert.strictEqual(results.cycleUpstreamDown.status, 200, 'still answers');
+   assert.strictEqual(results.cycleUpstreamDown.body.success, false, 'reports the failure');
+   assert.ok(
+      results.cycleUpstreamDown.body.data.errors.some((e) => e.startsWith('poll:')),
+      'names the failed step',
+   );
+   assert.ok('webhooks' in results.cycleUpstreamDown.body.data, 'webhook sweep still ran');
 });
 
 test('negative limit is clamped instead of dumping the table', () => {
@@ -241,23 +346,44 @@ test('a failed webhook is recorded, not lost', () => {
    assert.ok(wh.nextAttemptAt, 'retry scheduled');
 });
 
-test('replay re-queues, 404s unknown, 409s pending', () => {
+test('replay re-queues and 404s an unknown trx', () => {
    assert.strictEqual(results.replay.status, 200);
    assert.strictEqual(results.replayUnknown.status, 404);
-   assert.strictEqual(results.replayPending.status, 409);
 });
 
 test('a returning consumer receives the queued event with a valid signature', () => {
    assert.ok(delivered, 'webhook was delivered after the consumer came back');
    assert.ok(delivered.valid, 'signature verifies against the raw body');
    assert.strictEqual(delivered.payload.trxId, trxId);
-   assert.strictEqual(delivered.payload.event, 'payment.expired');
-   assert.strictEqual(delivered.payload.amountToPay, results.created.body.data.amountToPay);
+   assert.strictEqual(delivered.payload.event, 'payment.paid');
+   assert.strictEqual(delivered.payload.amountToPay, createdAmount);
    assert.strictEqual(delivered.payload.uniqueCode, results.created.body.data.uniqueCode);
    assert.strictEqual(results.afterReplay.body.data.webhook.state, 'SENT', 'marked delivered');
 });
 
-const ok = report();
+test('a per-transaction callbackSecret signs that webhook, not the global secret', () => {
+   assert.strictEqual(results.secretCreate.status, 201);
+   assert.ok(perTrx, 'webhook delivered');
+   assert.ok(perTrx.signedWithPerTrx, 'signature verifies with the per-trx secret');
+   assert.ok(!perTrx.signedWithGlobal, 'global secret must NOT verify it');
+});
+
+test('callbackSecret is never echoed back and is length-checked', () => {
+   assert.ok(!('callbackSecret' in results.secretCreate.body.data), 'absent from create response');
+   assert.ok(!('callbackSecret' in results.secretStatus.body.data), 'absent from status response');
+   assert.ok(!perTrx.body.includes('per-trx-secret-123'), 'absent from the webhook payload');
+   assert.strictEqual(results.secretShort.status, 400, 'rejects a secret under 8 chars');
+});
+
+test('health degrades to 503 when the GoBiz session is down', () => {
+   assert.strictEqual(results.healthDegraded.status, 503, 'signals degraded to a monitor');
+   assert.strictEqual(results.healthDegraded.body.success, false);
+   assert.strictEqual(results.healthDegraded.body.data.session.ok, false);
+   assert.match(results.healthDegraded.body.data.session.lastError, /cooldown/i);
+   assert.strictEqual(results.healthRecovered.status, 200, 'back to 200 once the session recovers');
+});
+
+const ok = await report();
 server.close();
-cleanup(db);
+await db.close();
 process.exit(ok ? 0 : 1);

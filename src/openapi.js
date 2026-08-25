@@ -91,6 +91,10 @@ export const openApiSpec = {
          'Self-hosted QRIS payment gateway. Create payments, generate dynamic ' +
          'QR codes, track status by transaction ID, and receive signed webhooks ' +
          'when a payment is settled. See docs/API.md for the full guide.\n\n' +
+         '🖥️ **Admin dashboard:** [/admin](/admin)\n\n' +
+         '⚙️ **Detection model:** there is no background process. `GET /payment/{trxId}` ' +
+         'on a PENDING transaction drives a globally throttled upstream poll, and ' +
+         'that is the only scheduler — there is no cron.\n\n' +
          '📦 **Source:** [github.com/cv3inx/gobiz-payment](https://github.com/cv3inx/gobiz-payment)',
       contact: { name: 'GitHub — cv3inx/gobiz-payment', url: 'https://github.com/cv3inx/gobiz-payment' },
       license: { name: 'MIT', url: 'https://github.com/cv3inx/gobiz-payment/blob/main/LICENSE' },
@@ -261,6 +265,70 @@ export const openApiSpec = {
                { name: 'offset', in: 'query', schema: { type: 'integer', default: 0, minimum: 0 } },
             ],
             responses: { 200: { description: 'OK' } },
+         },
+      },
+      '/api/admin/stats': {
+         get: {
+            summary: 'Dashboard aggregates: counts, revenue windows, daily series, recent feed',
+            description: 'Everything the /admin dashboard renders, in one round trip. ' +
+               '`poll.staleSeconds` is the number to watch — it says how long ago payment ' +
+               'detection last ran, so a dead external scheduler is visible immediately.',
+            security: [{ ApiKeyAuth: [] }],
+            parameters: [
+               { name: 'days', in: 'query', schema: { type: 'integer', default: 14, minimum: 1, maximum: 90 }, description: 'Length of the daily series. Clamped to 1..90' },
+            ],
+            responses: {
+               200: {
+                  description: 'OK',
+                  content: {
+                     'application/json': {
+                        example: {
+                           success: true,
+                           data: {
+                              summary: {
+                                 total: 128, pending: 3, paid: 96, expired: 29,
+                                 webhooksOwed: 1, webhooksStuck: 0,
+                                 revenueAll: 5_120_000, revenueToday: 152_500,
+                                 revenue7d: 980_000, revenue30d: 3_400_000,
+                                 unmatchedPayments: 1, unmatchedValue: 888_111,
+                                 conversionRate: 0.768,
+                              },
+                              daily: [{ day: '2026-07-10', created: 9, paid: 7, expired: 2, revenue: 350_000 }],
+                              recent: [{ trxId: 'ORDER-1042', status: 'PAID', payAmount: 52_637 }],
+                              poll: { lastPollAt: '2026-07-10T12:29:58.000Z', staleSeconds: 4, minIntervalMs: 7000 },
+                              session: { ok: true, reauths: 2, lastError: null },
+                              uniqueCode: { cursor: 37, max: 99 },
+                           },
+                        },
+                     },
+                  },
+               },
+               401: { description: 'Missing/invalid API key' },
+            },
+         },
+      },
+      '/api/admin/poll': {
+         post: {
+            summary: 'Run one full cycle now (ignores the poll throttle)',
+            description: 'Probe the session, poll GoBiz, expire overdue transactions, retry ' +
+               'owed webhooks — the same cycle ordinary traffic drives, but ignoring the ' +
+               'throttle so an operator can force reconciliation from the dashboard.',
+            security: [{ ApiKeyAuth: [] }],
+            responses: {
+               200: { description: 'Cycle finished. `success: false` means a step failed; see `data.errors`' },
+               401: { description: 'Missing/invalid API key' },
+               503: { description: 'Upstream client not configured' },
+            },
+         },
+      },
+      '/api/admin/webhooks/drain': {
+         post: {
+            summary: 'Retry every owed webhook now instead of on its backoff schedule',
+            security: [{ ApiKeyAuth: [] }],
+            responses: {
+               200: { description: 'Attempted', content: { 'application/json': { example: { success: true, data: { attempted: 4 } } } } },
+               401: { description: 'Missing/invalid API key' },
+            },
          },
       },
       '/health': {

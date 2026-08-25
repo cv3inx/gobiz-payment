@@ -5,6 +5,7 @@ import { log, dim, fg, useColor } from './logger.js';
 import { securityHeaders, requireApiKey, rateLimit } from './security.js';
 import { paymentRoutes } from './routes/payments.js';
 import { historyRoutes } from './routes/history.js';
+import { adminRoutes } from './routes/admin.js';
 import { systemRoutes, healthRoutes } from './routes/system.js';
 
 const logHttp = log('http');
@@ -33,7 +34,12 @@ function requestLogger() {
    });
 }
 
-export function createApp() {
+/**
+ * @param {object} [deps]
+ * @param {import('../lib/gobiz.js').default} [deps.merchant] - enables traffic-driven
+ *   payment detection and the /api/admin/poll action
+ */
+export function createApp({ merchant = null } = {}) {
    const app = express();
 
    // Trust a fixed number of proxy hops. `true` would accept the client's own
@@ -41,17 +47,26 @@ export function createApp() {
    app.set('trust proxy', /^\d+$/.test(config.trustProxy) ? Number(config.trustProxy) : config.trustProxy);
 
    app.use(requestLogger());
+
+   // Ahead of the docs, so serving the Swagger bundle can't be used to hammer the
+   // deployment for free.
+   app.use(rateLimit({ max: config.rateMax }));
+
+   // Docs stay ahead of securityHeaders: Swagger UI's inline assets do not survive
+   // the API's `default-src 'none'` policy.
    app.use(systemRoutes());
 
    app.use(securityHeaders);
    app.use(express.json({ limit: '64kb' }));
-   app.use(rateLimit({ max: config.rateMax }));
 
    const guard = requireApiKey(config.apiKey);
    app.use(healthRoutes());
-   app.use(paymentRoutes(guard));
+   app.use(adminRoutes(guard, merchant));
+   app.use(paymentRoutes(guard, merchant));
    app.use(historyRoutes(guard));
 
+   // Only API prefixes reach this app (see server/middleware/api.ts), so an
+   // unmatched path here really is an unknown endpoint, not a Nuxt page.
    app.use((req, res) => res.status(404).json({ success: false, error: 'not found' }));
 
    // Last resort: a throw in any route lands here instead of killing the process

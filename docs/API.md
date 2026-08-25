@@ -1,30 +1,39 @@
 # GoBiz Payment Gateway — API
 
-Self-hosted QRIS payment gateway on top of GoPay Merchant (GoBiz). Creates
-dynamic QRIS, watches incoming payments, resolves them to a transaction by
-amount, and fires a signed webhook.
+QRIS payment gateway on top of GoPay Merchant (GoBiz). Creates dynamic QRIS,
+watches incoming payments, resolves them to a transaction by amount, and fires a
+signed webhook.
 
-Run: `npm start` → listens on `PORT` (default `3000`).
+State lives in Postgres. One Nuxt app owns the deployment: Vue pages in `web/`,
+this Express API in `src/`, wired together by `server/middleware/api.ts`.
+`npm run dev` serves both on `PORT` (default `3000`).
 
-## Running in the background (PM2)
+## How payments get detected
 
-The GoPay watcher runs **inside** the server process — it polls every `POLL_MS`,
-matches incoming payments, and fires webhooks automatically. Keeping the process
-alive is all it takes; PM2 handles that + restart-on-crash + restart-on-boot.
+There is no background process. Nothing holds a `setInterval`, because a
+serverless instance is frozen between requests. Detection has three triggers:
 
-```bash
-npm i -g pm2
-npm run pm2:start        # pm2 start ecosystem.config.cjs
-pm2 save                 # persist the process list
-pm2 startup              # print the command to run on system boot (run it once)
+There is no cron. Application traffic is the scheduler.
 
-npm run pm2:logs         # tail logs
-npm run pm2:restart      # after a code/.env change
-npm run pm2:stop
-```
+| Trigger | Fires when | Covers |
+|---------|-----------|--------|
+| **Status read** | `GET /payment/{trxId}` on a PENDING transaction | Everything: poll, reconcile, expiry sweep, webhook retries |
+| **`POST /api/admin/poll`** | Dashboard button, or any caller with the API key | Forcing a cycle immediately, ignoring the throttle |
 
-Run a **single instance** (fork mode, already set in the config). Do not use PM2
-cluster mode — duplicate pollers would double-fire webhooks.
+A status read may claim the slot and run a full cycle. The slot is throttled
+**globally through the database** (`POLL_MIN_INTERVAL_MS`, default 7s) with one
+atomic UPDATE, so a hundred payers polling across a hundred instances still produce
+one GoBiz request per 7 seconds — and an idle gateway makes zero upstream calls.
+That is gentler on the account than a fixed-interval poller running 24/7.
+
+`GET /api/admin/stats` reports `poll.staleSeconds`, which the dashboard surfaces as
+"Poll terakhir".
+
+**Consequence, stated plainly:** with literally zero traffic nothing runs, so a
+`payment.expired` webhook can sit until the next request. `payment.paid` is
+unaffected — the cycle that finds the payment is the one that settles it and queues
+the webhook. If you want a time guarantee, have any free external scheduler hit
+`POST /api/admin/poll` with `X-API-Key`. Optional, not required.
 
 ## How matching works (read this)
 
@@ -46,11 +55,14 @@ then wrapping back to 1:
 | 99          | 10000  | 99        | 10099       |
 | 100         | 10000  | 1         | 10001 *(wrapped)* |
 
-The cursor is persisted in SQLite, so a restart continues from the last code
-instead of replaying from 1. A code still held by a `PENDING` transaction at the
-same base amount is skipped, so two open orders never share a payable amount.
-Legacy rows created before codes were recorded are still avoided — the allocator
-also checks the payable amount itself, not just the code.
+The cursor is a Postgres **sequence**, so a cold start continues from the last
+code instead of replaying from 1, and `nextval` is atomic without a transaction or
+lock — two instances allocating at the same moment can never receive the same code.
+
+Allocation is advisory. The real guarantee is the partial unique index
+`("payAmount") WHERE status = 'PENDING'`: two open orders physically cannot share
+a payable amount. If an insert loses that race, `create` draws another code and
+retries (up to 3 times) before returning `503`.
 
 **Consequence:** `amountToPay` is up to `UNIQUE_CODE_MAX` rupiah higher than
 `amount + fee`. Always render the QR for `amountToPay` and show that figure to the
@@ -176,7 +188,9 @@ though HTTP still works — point your load balancer or uptime monitor at this.
 
 ## Session keepalive
 
-The payment watcher polls GoBiz every `POLL_MS`, so the session never goes idle. On
+The session is probed on each cycle, not per request — probing per request would
+multiply upstream calls by traffic. Session health is stored in the `meta` table,
+because the instance serving `/health` is almost never the one that ran the probe. On
 top of that a cheap probe (a 1-record merchant lookup, not a history fetch) runs
 every `SESSION_CHECK_MS` to:
 
@@ -187,7 +201,7 @@ every `SESSION_CHECK_MS` to:
 A failed login puts GoBiz into a ~15 minute cooldown; during that window the probe
 logs at `info` and keeps `/health` at `503` rather than hammering the endpoint.
 
-> Do not lower `SESSION_CHECK_MS` or `POLL_MS` below their defaults — aggressive
+> Do not lower `POLL_MIN_INTERVAL_MS` or `SESSION_CHECK_MS` below their defaults — aggressive
 > polling of GoBiz's internal API risks the merchant account being blocked. The
 > server warns at boot if you do.
 
@@ -213,7 +227,7 @@ Header `X-Signature` = `HMAC-SHA256(secret, rawBody)`, where `secret` is the
 transaction's own `callbackSecret` if one was set at create time, else the global
 `WEBHOOK_SECRET`. Each attempt is capped at `WEBHOOK_TIMEOUT_MS` (default 10s).
 
-**Delivery is durable.** The owed webhook is written to SQLite before the first
+**Delivery is durable.** The owed webhook is written to Postgres before the first
 send, so it survives both a consumer outage and a gateway restart. Failures retry
 with exponential backoff (30s, 1m, 2m … capped at `WEBHOOK_MAX_BACKOFF_MS`) up to
 `WEBHOOK_MAX_ATTEMPTS` (default 12 ≈ 2 hours of downtime). A consumer returning
@@ -233,7 +247,7 @@ retry window). Resets the counter; the sweeper delivers on its next pass. `409` 
 the transaction is still `PENDING`.
 
 Exactly one webhook fires per transaction: the `PAID` and `EXPIRED` paths both
-settle through a `status = 'PENDING'` guard in SQLite, so a payment landing as the
+settle through a `status = 'PENDING'` guard in Postgres, so a payment landing as the
 expiry timer fires produces one event, not two.
 
 ### Verifying (consumer side)
@@ -282,11 +296,18 @@ Envelope: `{ "success": false, "error": "message" }`.
   hops of `X-Forwarded-For` (default `1`). Do not set it to `true` — that takes
   the client's own XFF at face value, letting anyone forge an IP and evade the
   per-IP rate limit. Match it to your actual number of proxies.
-- SQLite file `transaction.db` holds transaction history — back it up, keep it off public paths.
-- State survives restarts; pending expiry timers are rebuilt on boot.
+- Postgres holds transaction history, the GoBiz token, and merchant ID — back it up, restrict network access.
+- `POST /api/admin/poll` is the only way to force a cycle and it sits behind
+  `API_KEY`. Leaving `API_KEY` unset makes it open, which lets anyone drive the
+  upstream polling loop until the GoBiz account is rate-limited.
+- All state is in Postgres, so a cold start loses nothing. Expiry is settled on read
+  and on each cycle rather than by timers.
+- The `/admin` dashboard shell is served unauthenticated (it is an empty shell); every
+  figure on it comes from `/admin/*` behind `API_KEY`.
 - `callbackUrl` is SSRF-guarded: only http/https, no credentials, no internal/private
   hosts (loopback, `10/8`, `172.16/12`, `192.168/16`, link-local, cloud metadata). The
   check is literal-IP only — it does not resolve DNS, so a hostname resolving to a
   private IP still passes. Add DNS pinning if that's a concern in your network.
-- Graceful shutdown on `SIGINT`/`SIGTERM`: stops the poller, cancels timers, drains
-  connections, closes SQLite; force-exits after 10s. PM2 restarts are clean.
+- Graceful shutdown on `SIGINT`/`SIGTERM` (local server): stops the cycle, drains
+  connections, closes the pool; force-exits after 10s. On Vercel there is nothing to
+  shut down — every unit of work is committed to Postgres before its response.

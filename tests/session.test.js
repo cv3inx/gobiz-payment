@@ -1,9 +1,9 @@
 import assert from 'node:assert';
-import { createSuite, useTempDatabase } from './helpers.js';
+import { createSuite, setupDatabase, useTempEnv } from './helpers.js';
 
-const { cleanup } = useTempDatabase({ SESSION_CHECK_MS: '50' });
-const { db } = await import('../src/db/index.js');
-const { check, sessionHealth, startKeepalive } = await import('../src/services/session.js');
+useTempEnv();
+const db = await setupDatabase();
+const { check, sessionHealth } = await import('../src/services/session.js');
 
 const { test, report } = createSuite('session');
 
@@ -22,73 +22,50 @@ function fakeMerchant({ tokenValid = true, initFails = false } = {}) {
    };
 }
 
-const results = {};
-
-results.healthy = await (async () => {
+test('a valid token passes without re-authenticating', async () => {
    const m = fakeMerchant({ tokenValid: true });
-   const ok = await check(m);
-   return { ok, state: sessionHealth(), initCalls: m.initCalls };
-})();
+   assert.strictEqual(await check(m), true);
+   const state = await sessionHealth();
+   assert.strictEqual(m.initCalls, 0, 'no needless login');
+   assert.strictEqual(state.consecutiveFailures, 0);
+   assert.ok(state.lastOkAt, 'records success time');
+});
 
-results.reauth = await (async () => {
+test('an invalid token triggers re-authentication', async () => {
    const m = fakeMerchant({ tokenValid: false });
-   const ok = await check(m);
-   return { ok, state: sessionHealth(), initCalls: m.initCalls };
-})();
-
-results.failure = await (async () => {
-   const m = fakeMerchant({ tokenValid: false, initFails: true });
-   const ok = await check(m);
-   return { ok, state: sessionHealth() };
-})();
-
-results.recovery = await (async () => {
-   const ok = await check(fakeMerchant({ tokenValid: true }));
-   return { ok, state: sessionHealth() };
-})();
-
-results.keepalive = await (async () => {
-   const m = fakeMerchant({ tokenValid: true });
-   const stop = startKeepalive(m);
-   const before = sessionHealth().lastCheckAt;
-   await new Promise((r) => setTimeout(r, 180)); // ~3 ticks at 50ms
-   stop();
-   const after = sessionHealth().lastCheckAt;
-   const settled = sessionHealth().lastCheckAt;
-   await new Promise((r) => setTimeout(r, 120)); // must not tick after stop()
-   return { before, after, stoppedAt: settled, afterStop: sessionHealth().lastCheckAt };
-})();
-
-test('a valid token passes without re-authenticating', () => {
-   assert.strictEqual(results.healthy.ok, true);
-   assert.strictEqual(results.healthy.initCalls, 0, 'no needless login');
-   assert.strictEqual(results.healthy.state.consecutiveFailures, 0);
-   assert.ok(results.healthy.state.lastOkAt, 'records success time');
+   assert.strictEqual(await check(m), true);
+   assert.strictEqual(m.initCalls, 1, 'init() called to refresh');
+   assert.ok((await sessionHealth()).reauths >= 1, 'reauth counted');
 });
 
-test('an invalid token triggers re-authentication', () => {
-   assert.strictEqual(results.reauth.ok, true);
-   assert.strictEqual(results.reauth.initCalls, 1, 'init() called to refresh');
-   assert.ok(results.reauth.state.reauths >= 1, 'reauth counted');
+test('a failed re-auth marks the session down and records why', async () => {
+   assert.strictEqual(await check(fakeMerchant({ tokenValid: false, initFails: true })), false);
+   const state = await sessionHealth();
+   assert.match(state.lastError, /cooldown/i);
+   assert.ok(state.consecutiveFailures >= 1);
 });
 
-test('a failed re-auth marks the session down and records why', () => {
-   assert.strictEqual(results.failure.ok, false);
-   assert.match(results.failure.state.lastError, /cooldown/i);
-   assert.ok(results.failure.state.consecutiveFailures >= 1);
+test('consecutive failures accumulate across invocations', async () => {
+   // The whole point of persisting health: each invocation is a different instance,
+   // so an in-memory counter would reset to 1 every time.
+   const before = (await sessionHealth()).consecutiveFailures;
+   await check(fakeMerchant({ tokenValid: false, initFails: true }));
+   assert.strictEqual((await sessionHealth()).consecutiveFailures, before + 1);
 });
 
-test('a later success clears the failure state', () => {
-   assert.strictEqual(results.recovery.ok, true);
-   assert.strictEqual(results.recovery.state.consecutiveFailures, 0, 'counter reset');
-   assert.strictEqual(results.recovery.state.lastError, null, 'error cleared');
+test('a later success clears the failure state', async () => {
+   assert.strictEqual(await check(fakeMerchant({ tokenValid: true })), true);
+   const state = await sessionHealth();
+   assert.strictEqual(state.consecutiveFailures, 0, 'counter reset');
+   assert.strictEqual(state.lastError, null, 'error cleared');
 });
 
-test('keepalive probes on its interval and stops when told', () => {
-   assert.notStrictEqual(results.keepalive.after, results.keepalive.before, 'probed while running');
-   assert.strictEqual(results.keepalive.afterStop, results.keepalive.stoppedAt, 'no probe after stop()');
+test('reauth count is not lost when a later check fails', async () => {
+   const reauths = (await sessionHealth()).reauths;
+   await check(fakeMerchant({ tokenValid: false, initFails: true }));
+   assert.strictEqual((await sessionHealth()).reauths, reauths, 'preserved through a failure');
 });
 
-const ok = report();
-cleanup(db);
+const ok = await report();
+await db.close();
 process.exit(ok ? 0 : 1);

@@ -44,4 +44,4 @@ test('blocks internal hosts, bad schemes, and credentials (SSRF)', () => {
    for (const url of blocked) assert.ok(!validateWebhookUrl(url).ok, `${url} rejected`);
 });
 
-process.exit(report() ? 0 : 1);
+process.exit(await report() ? 0 : 1);

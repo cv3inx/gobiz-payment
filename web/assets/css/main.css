@@ -1,0 +1,179 @@
+/* Design tokens. Dark by default, light when the OS asks for it — one palette,
+   two themes, so nothing has to be restyled per mode. */
+:root {
+  --bg: #0b0d12;
+  --panel: #14171f;
+  --panel-2: #1a1e28;
+  --line: #262b38;
+  --text: #e6e9ef;
+  --muted: #8b94a7;
+  --accent: #6f9cff;
+  --ok: #35c07f;
+  --warn: #e0a33a;
+  --bad: #e2564d;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.28);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f1f3f7;
+    --line: #e2e6ee;
+    --text: #131722;
+    --muted: #5f6982;
+    --accent: #2f6bdb;
+    --shadow: 0 1px 2px rgb(16 24 40 / 0.06);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { color-scheme: dark light; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
+
+/* ── controls ─────────────────────────────────────────────────────────────── */
+.btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 7px 13px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+input,
+select {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 8px 11px;
+  border-radius: 8px;
+  font: inherit;
+}
+input { width: 100%; }
+select { font-size: 13px; padding: 7px 10px; }
+
+/* Keyboard focus must always be visible; :focus-visible keeps it off mouse clicks. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── layout ───────────────────────────────────────────────────────────────── */
+.grid { display: grid; gap: 12px; }
+.tiles { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); }
+.row { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 15px 16px;
+  box-shadow: var(--shadow);
+}
+
+h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 26px 0 11px;
+  font-weight: 600;
+}
+
+.label {
+  color: var(--muted);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.muted { color: var(--muted); }
+.mono, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+
+/* ── tables ───────────────────────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 550;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 10px 8px;
+}
+td { padding: 9px 10px; border-top: 1px solid var(--line); vertical-align: middle; }
+/* Numbers align on the decimal and stop jittering as values change. */
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--panel-2); }
+
+/* ── status ───────────────────────────────────────────────────────────────── */
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.pill.PENDING { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.pill.PAID { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.pill.EXPIRED { color: var(--muted); border-color: var(--line); }
+
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--bad); }
+.dot.unknown { background: var(--muted); }
+
+.banner {
+  border-radius: var(--radius);
+  padding: 11px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  border: 1px solid;
+}
+.banner.bad {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+  background: color-mix(in srgb, var(--bad) 8%, transparent);
+}
+.banner.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.banner.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+}
+
+/* Screen-reader-only: labels that must exist for assistive tech but not on screen. */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+@media (max-width: 620px) {
+  .hide-sm { display: none; }
+}

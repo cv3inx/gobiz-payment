@@ -38,7 +38,8 @@ async function post(url, trx) {
             'X-Signature': signBody(body, secret),
          },
          body,
-         // Without a timeout a black-holed consumer hangs this promise forever.
+         // Without a timeout a black-holed consumer hangs until the function's
+         // own wall-clock limit kills it, taking the whole sweep down with it.
          signal: AbortSignal.timeout(config.webhook.timeoutMs),
       });
       return res.ok ? { ok: true, status: res.status } : { ok: false, why: `HTTP ${res.status}` };
@@ -52,7 +53,7 @@ async function post(url, trx) {
 export async function deliver(trx) {
    const url = trx.callbackUrl || config.webhook.url;
    if (!url) {
-      store.markSent(trx.trxId); // nothing configured — don't queue forever
+      await store.markSent(trx.trxId); // nothing configured — don't queue forever
       return;
    }
 
@@ -60,14 +61,14 @@ export async function deliver(trx) {
    const result = await post(url, trx);
 
    if (result.ok) {
-      store.markSent(trx.trxId);
+      await store.markSent(trx.trxId);
       logger.ok(`${trx.trxId} delivered (HTTP ${result.status}) on attempt ${attempt}`);
       return;
    }
 
    const exhausted = attempt >= config.webhook.maxAttempts;
    const nextAt = exhausted ? null : new Date(Date.now() + backoffMs(attempt)).toISOString();
-   store.markFailed(trx.trxId, result.why, nextAt);
+   await store.markFailed(trx.trxId, result.why, nextAt);
 
    if (exhausted) {
       logger.error(`${trx.trxId} gave up after ${attempt} attempts: ${result.why} (${url}) — ` +
@@ -78,30 +79,46 @@ export async function deliver(trx) {
    }
 }
 
-/** Queue a webhook, then try it immediately. Failures fall to the sweeper. */
-export function enqueue(trx) {
-   store.owe(trx.trxId);
-   deliver(trx).catch((e) => logger.error(`${trx.trxId} delivery crashed: ${e.message}`));
-}
-
-/** Deliver every webhook that is due. */
-export async function drain() {
-   for (const trx of store.due({ maxAttempts: config.webhook.maxAttempts })) {
+/**
+ * Queue a webhook, then try it once inline.
+ *
+ * The inline attempt is awaited rather than fired and forgotten: a serverless
+ * instance is frozen the moment the response is sent, so a floating promise would
+ * be killed mid-flight. Failures are already persisted, so the cron sweep picks
+ * them up regardless.
+ */
+export async function enqueue(trx) {
+   await store.owe(trx.trxId);
+   try {
       await deliver(trx);
+   } catch (e) {
+      logger.error(`${trx.trxId} delivery crashed: ${e.message}`);
    }
 }
 
 /**
- * Background sweeper draining owed webhooks, so a redelivery survives both a
- * consumer outage and a gateway restart.
+ * Deliver every webhook that is due, claiming each so an overlapping run cannot
+ * send the same event twice. Delivery is concurrent but bounded — a serverless
+ * invocation has a wall clock, and a batch of slow consumers done serially would
+ * blow through it.
  */
-export function startSweeper() {
-   const timer = setInterval(
-      () => drain().catch((e) => logger.error(`sweep failed: ${e.message}`)),
-      config.webhook.sweepMs,
-   );
-   return () => clearInterval(timer);
+export async function drain({ limit = 20, concurrency = 5 } = {}) {
+   const batch = await store.claim({ maxAttempts: config.webhook.maxAttempts, limit });
+   if (!batch.length) return 0;
+
+   const queue = [...batch];
+   const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      while (queue.length) {
+         const trx = queue.shift();
+         try {
+            await deliver(trx);
+         } catch (e) {
+            logger.error(`${trx.trxId} delivery crashed: ${e.message}`);
+         }
+      }
+   });
+   await Promise.all(workers);
+   return batch.length;
 }
 
-export const owedCount = () =>
-   store.due({ maxAttempts: config.webhook.maxAttempts, limit: 10_000 }).length;
+export const owedCount = () => store.owedCount();

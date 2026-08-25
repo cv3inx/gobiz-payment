@@ -1,5 +1,5 @@
 // Tiny leveled logger — colored badges, icons, aligned scopes. ANSI auto-off
-// when not a TTY (PM2 log files stay plain).
+// when not a TTY (log files and Vercel output stay plain).
 // ponytail: no winston/pino. A few lines cover it for a single-process app.
 const useColor = process.stdout.isTTY;
 
@@ -29,7 +29,7 @@ function padScope(scope) {
 }
 
 function badge(L) {
-   // colored: icon + label on a bg badge. plain: fixed-width [LABEL] for aligned PM2 logs.
+   // colored: icon + label on a bg badge. plain: fixed-width [LABEL] for aligned log files.
    if (useColor) return style(L.badge, ` ${L.icon} ${L.label.padEnd(4)} `);
    return `[${L.label.padEnd(4)}]`;
 }

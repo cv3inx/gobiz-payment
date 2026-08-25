@@ -46,4 +46,4 @@ test('a tampered payload fails its own checksum', () => {
    assert.ok(!isValidQris(qris.slice(0, -5) + '9' + qris.slice(-4)), 'payload edit detected');
 });
 
-process.exit(report() ? 0 : 1);
+process.exit(await report() ? 0 : 1);

@@ -1,26 +1,30 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 
 /**
- * Point the modules under test at a throwaway database. MUST run before any
- * `src/db/*` import, since the connection is opened at module load.
+ * Point the modules under test at a throwaway database.
+ *
+ * With no DATABASE_URL the db layer falls back to PGlite — real Postgres compiled
+ * to WASM, in-process — so the suite runs offline against the same SQL the
+ * deployment uses. Set TEST_DATABASE_URL to run it against a real server instead.
+ *
+ * MUST run before any `src/db/*` import, since the driver is chosen on first query.
  */
-export function useTempDatabase(env = {}) {
-   const file = path.join(os.tmpdir(), `gobiz-test-${crypto.randomUUID()}.db`);
-   process.env.DB_FILE = file;
+export function useTempEnv(env = {}) {
+   if (process.env.TEST_DATABASE_URL) process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+   else delete process.env.DATABASE_URL;
+
    process.env.QRIS_STRING ??= '00020101021126001180002ID5802ID540520006304ABCD';
    process.env.WEBHOOK_SECRET ??= 'test-secret';
-   Object.assign(process.env, env);
 
-   return {
-      file,
-      cleanup: (db) => {
-         try { db?.close(); } catch {}
-         for (const suffix of ['', '-wal', '-shm']) fs.rmSync(file + suffix, { force: true });
-      },
-   };
+   delete process.env.VERCEL;
+   Object.assign(process.env, env);
+}
+
+/** Apply the schema to the (fresh) test database. */
+export async function setupDatabase() {
+   const db = await import('../src/db/index.js');
+   await db.migrate();
+   return db;
 }
 
 export function makeTrx(overrides = {}) {
@@ -35,6 +39,7 @@ export function makeTrx(overrides = {}) {
       uniqueCode: 1,
       qrString: 'qris',
       callbackUrl: null,
+      callbackSecret: null,
       idempotencyKey: null,
       metadata: { orderId: 42 },
       createdAt: new Date().toISOString(),
@@ -45,21 +50,28 @@ export function makeTrx(overrides = {}) {
    };
 }
 
-/** Minimal test runner: collects failures so one bad case doesn't hide the rest. */
+/**
+ * Minimal test runner: collects failures so one bad case doesn't hide the rest.
+ * `test` accepts async functions — every DB call is a promise now.
+ */
 export function createSuite(title) {
    const failures = [];
+   const queued = [];
    let passed = 0;
 
-   const test = (name, fn) => {
-      try {
-         fn();
-         passed++;
-      } catch (e) {
-         failures.push({ name, message: e.message });
-      }
-   };
+   // Queued, not started: these cases share one database, so running them
+   // concurrently would have them trample each other's rows.
+   const test = (name, fn) => queued.push({ name, fn });
 
-   const report = () => {
+   const report = async () => {
+      for (const { name, fn } of queued) {
+         try {
+            await fn();
+            passed++;
+         } catch (e) {
+            failures.push({ name, message: e.message });
+         }
+      }
       for (const f of failures) console.error(`  FAIL  ${f.name}\n        ${f.message}`);
       const status = failures.length ? 'FAIL' : 'OK';
       console.log(`${status}: ${title} — ${passed} passed, ${failures.length} failed`);
