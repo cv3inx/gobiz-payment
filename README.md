@@ -39,7 +39,8 @@ Dibangun di atas library GoBiz dari [**kavionn/gobiz-payment**](https://github.c
   cursor kode unik, health sesi. Ga ada file lokal, ga ada state di memori
 - 🖥️ **Admin dashboard** — Nuxt 4 + Vue 3 di `/admin`: stats, grafik harian, tabel
   transaksi, batalkan / kirim ulang webhook, tombol "cek pembayaran" manual
-- 🛡️ **Security** — API key (timing-safe), rate limit, SSRF guard, security headers
+- 🛡️ **Security** — API key (timing-safe), rate limit, SSRF guard, security headers,
+  dan endpoint publik yang menahan field milik merchant
 - 📚 **Swagger UI** — dokumentasi interaktif di `/docs`
 - ⚡ **Tanpa cron sama sekali** — buka status transaksi PENDING = memicu satu cycle
   (poll GoBiz + expire + kirim webhook), di-throttle global lewat DB. Real-time pas
@@ -130,7 +131,7 @@ Yang sering dipakai (opsional):
 | `TRUST_PROXY` | `1` | Hop proxy yg dipercaya. Jangan `true` |
 | `GOPAY_ACCESS_TOKEN` | *(kosong)* | Pakai token browser, ganti email/password |
 
-Sisanya (`SESSION_CHECK_MS`, `UNIQUE_CODE_MAX`, `RATE_MAX`, `MAX_AMOUNT`,
+Sisanya (`UNIQUE_CODE_MAX`, `RATE_MAX`, `MAX_AMOUNT`,
 `WEBHOOK_*`) aman defaultnya — lihat [.env.example](.env.example).
 **Jangan turunin `POLL_MIN_INTERVAL_MS` di bawah 7000**, risiko akun diblokir.
 
@@ -160,6 +161,9 @@ npm test           # 7 suite, offline pakai PGlite
 - Admin dashboard → **`http://localhost:3000/admin`**
 - Swagger UI → **`http://localhost:3000/docs`**
 
+CI di GitHub Actions menjalankan `npm test` + `nuxt build` tiap push — suite-nya
+offline (PGlite), jadi ga butuh service container atau secret apa pun.
+
 Satu server buat dua-duanya. Nuxt melayani halaman Vue; `server/middleware/api.ts`
 melempar path API ke app Express di `src/` — API-nya ga ditulis ulang jadi Nitro
 handler, jadi 78 assertion di test suite tetap menguji kode yang sama.
@@ -184,6 +188,32 @@ vercel deploy --prod
 vercel env pull .env.local             # tarik DATABASE_URL ke lokal
 npm run migrate                        # sekali, buat bikin tabel
 ```
+
+### 🌐 Custom domain
+
+```bash
+vercel domains add pay.violetics.id gobiz-payment
+vercel env add PUBLIC_URL production --no-sensitive   # https://pay.violetics.id
+```
+
+DNS-nya di Cloudflare, jadi tambahkan record ini di sana:
+
+| Type | Name | Content | Proxy |
+|------|------|---------|-------|
+| `A` | `pay` | `76.76.21.21` | **DNS only** (abu-abu) |
+
+> [!IMPORTANT]
+> **Matikan proxy Cloudflare (awan abu-abu, bukan oranye)** untuk record ini.
+> Dua alasan:
+> 1. Vercel harus bisa menjangkau domainnya buat menerbitkan sertifikat TLS. Kalau
+>    diproxy, penerbitan cert bisa nyangkut di "Invalid Configuration".
+> 2. Proxy Cloudflare menambah satu hop. `TRUST_PROXY=1` cuma benar untuk 1 hop
+>    (Vercel). Kalau tetap mau diproxy, ganti ke **`TRUST_PROXY=2`** — kalau tidak,
+>    rate limiter membaca IP Cloudflare, bukan IP pengunjung, jadi satu pengunjung
+>    nakal bisa menghabiskan kuota semua orang.
+
+Cek status: `vercel domains inspect pay.violetics.id`. `PUBLIC_URL` dipakai buat
+`qrImageUrl` absolut — kalau kosong, ditebak dari `VERCEL_PROJECT_PRODUCTION_URL`.
 
 ### ⚡ Kenapa ga butuh cron (dan ga butuh plan Pro)
 
@@ -225,11 +255,40 @@ Buka **`/admin`**, masukkan `API_KEY`. Nuxt 4 + Vue 3, di-build otomatis di Verc
 - Kartu stats: pending, lunas, uang masuk hari ini / 7 hari / 30 hari, webhook
   nunggak, pembayaran belum kecocokan
 - Grafik harian lunas vs kadaluarsa (7 / 14 / 30 hari)
-- Tabel transaksi terbaru + tombol **Batalkan** / **Ulang webhook**
-- Tabel pembayaran masuk yang **belum kecocokan** — buat rekonsiliasi manual
-- Tombol **Cek pembayaran** (paksa cycle, abaikan throttle) dan **Kirim ulang
-  webhook nunggak**
-- Panel sistem: poll terakhir, cursor kode unik, status sesi GoBiz, jumlah re-auth
+- **Cari `trxId`** (lookup persis) + **filter status** + paginasi
+- Tabel transaksi — klik baris buka **panel detail**: metadata, timeline, dan
+  `webhookLastError` beserta diagnosanya (`ECONNREFUSED` = consumer mati vs
+  `HTTP 500` = consumer hidup tapi handler-nya error)
+- **Rekonsiliasi manual** — tautkan pembayaran nyasar ke order, lihat di bawah
+- Tombol **Cek pembayaran** (paksa cycle) dan **Kirim ulang webhook nunggak**
+- Panel sistem: poll terakhir, cursor kode unik, sesi GoBiz, **cooldown login**,
+  jumlah re-auth
+
+### 🔗 Rekonsiliasi manual
+
+Kalau pembeli mengirim nominal yang tidak sama dengan `amountToPay` (salah ketik,
+atau bayar setelah order kadaluarsa), duitnya masuk tapi tidak ada order yang cocok.
+Dashboard menampilkannya di tabel **"belum kecocokan"** dengan tombol **Tautkan…**.
+
+Isi `trxId` order tujuan, lalu gateway akan:
+
+1. mengklaim pembayaran itu (satu pembayaran tidak bisa dipakai untuk dua order)
+2. menandai order **PAID** — **termasuk kalau statusnya sudah `EXPIRED`**
+3. mengirim webhook `payment.paid`
+4. mencatat baris log `MANUAL RECONCILE ... received=X expected=Y difference=Z`
+
+> [!WARNING]
+> Ini satu-satunya jalan yang boleh menembus penjaga `status = 'PENDING'`. Kalau
+> consumer-mu sudah menerima `payment.expired` untuk order itu, dia akan menerima
+> `payment.paid` sesudahnya — **handler webhook-mu harus tahan urutan itu.**
+> Mengulang rekonsiliasi yang sama dijawab `409` dan tidak mengirim webhook kedua.
+
+### 💤 Cooldown login GoBiz
+
+Login GoBiz yang gagal memasang cooldown 15 menit **di database**, jadi instance
+berikutnya tidak langsung mencoba lagi dan memperdalam rate-limit. Dashboard
+menampilkan hitungan mundurnya dan **mematikan tombol "Cek pembayaran"** selama
+cooldown — satu-satunya keadaan di mana tindakan yang benar adalah menunggu.
 
 Auto-refresh 20 detik dan berhenti kalau tab-nya ga aktif — tiap refresh juga ikut
 menggerakkan satu cycle, jadi membiarkan dashboard terbuka = deteksi tetap jalan.
@@ -255,15 +314,23 @@ Detail lengkap: [docs/API.md](docs/API.md) atau Swagger di `/docs`.
 | GET | `/admin` | — | Dashboard Nuxt (halamannya publik, datanya 🔑) |
 | GET | `/api/admin/stats` | 🔑 | Semua angka dashboard dalam 1 request |
 | POST | `/api/admin/poll` | 🔑 | Paksa 1 cycle sekarang (abaikan throttle) |
+| POST | `/api/admin/reconcile` | 🔑 | Tautkan pembayaran nyasar ke order (bisa hidupkan EXPIRED) |
 | POST | `/api/admin/webhooks/drain` | 🔑 | Kirim ulang semua webhook nunggak |
 
 🔑 = butuh `X-API-Key: <API_KEY>` kalau `API_KEY` diset.
 
 > [!NOTE]
-> `GET /payment/:trxId` sengaja tanpa auth (pembeli perlu polling status), tapi
-> responsnya termasuk `metadata` dan `callbackUrl`. Kalau `trxId`-nya kamu isi
-> sendiri dan gampang ditebak (`ORDER-1042`), keduanya ikut kebaca orang lain.
-> Untuk alur publik, pakai `trxId` auto-generate (`TRX-xxxx`, 12 karakter acak).
+> **Dua endpoint mengembalikan bentuk berbeda tergantung ada API key atau tidak** —
+> keduanya harus tetap terbuka, jadi yang dibatasi adalah isinya:
+>
+> | Endpoint | Tanpa key | Dengan key |
+> |---|---|---|
+> | `GET /payment/:trxId` | `status`, `amountToPay`, `qrString`, `expiresAt`, `paidAt` | + `metadata`, `callbackUrl`, `webhook` |
+> | `GET /health` | status sesi GoBiz saja | + `pending`, `total`, `webhooksOwed`, `uniqueCodeCursor` |
+>
+> Alasannya: `trxId` yang kamu isi sendiri bisa ditebak (`ORDER-1042`), jadi
+> `metadata` merchant ga boleh ikut kebaca. Dan `/health` yang menyiarkan
+> "pending: 3, total: 128" ke publik = siapa pun bisa mengukur volume dagangmu.
 
 ### Contoh: create payment
 
@@ -351,6 +418,8 @@ lewat itu `/payment/create` balas `503`.
 ```
 nuxt.config.ts             srcDir: web/, SPA, satu-satunya entry deployment
 vercel.json                paksa preset framework nuxtjs
+public/robots.txt          Disallow: / — ga ada yang perlu diindeks
+.github/workflows/ci.yml   npm test + nuxt build tiap push
 server/middleware/api.ts   lempar path API ke app Express (fromNodeMiddleware)
 lib/gobiz.js               client GoBiz (auth via fetch, history) — dari kavionn
 scripts/migrate.js         apply schema (npm run migrate)

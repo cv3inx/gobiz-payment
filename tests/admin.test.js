@@ -63,6 +63,7 @@ upstream.history = [payin('GB-A', paidAmount), payin('GB-ORPHAN', 888_111)];
 results.manualPoll = await call('POST', '/api/admin/poll');
 
 results.stats = await call('GET', '/api/admin/stats?days=7');
+results.payments = await call('GET', '/payments?limit=15');
 results.statsClamped = await call('GET', '/api/admin/stats?days=9999');
 
 // ── poll-on-read throttle ────────────────────────────────────────────────────
@@ -111,13 +112,25 @@ test('stats report counts, revenue, and unmatched money', () => {
    assert.ok(summary.conversionRate > 0 && summary.conversionRate <= 1);
 });
 
-test('stats include a gap-filled daily series and a recent feed', () => {
-   const { daily, recent } = results.stats.body.data;
+test('stats include a gap-filled daily series', () => {
+   const { daily } = results.stats.body.data;
    assert.strictEqual(daily.length, 7, 'one entry per requested day, zeros included');
    assert.ok(daily.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.day)), 'ISO days');
    assert.ok(daily.some((d) => d.paid === 1), 'the paid order shows up');
-   assert.ok(recent.some((t) => t.trxId === paidId), 'recent feed lists it');
-   assert.strictEqual(typeof recent[0].payAmount, 'number', 'bigint decoded');
+});
+
+test('the dashboard table comes from /payments, with webhook diagnostics', () => {
+   // One source for the feed. It must carry what an operator needs to debug a
+   // failing webhook, not just its attempt count.
+   const rows = results.payments.body.data;
+   const row = rows.find((t) => t.trxId === paidId);
+   assert.ok(row, '/payments lists the reconciled order');
+   // The public shape calls it amountToPay, not payAmount — the dashboard reads
+   // this endpoint, so the name it exposes is the one that matters.
+   assert.strictEqual(typeof row.amountToPay, 'number', 'bigint decoded');
+   assert.strictEqual(row.amountToPay, row.amount + row.fee + row.uniqueCode);
+   assert.ok('webhook' in row, 'delivery state present');
+   assert.ok('metadata' in row, 'metadata present');
 });
 
 test('stats surface poll freshness and the days window is clamped', () => {

@@ -2,8 +2,9 @@
 /**
  * Admin dashboard.
  *
- * Everything renders from `GET /api/admin/stats` — one request per refresh rather
- * than six, because each one is a serverless invocation.
+ * Two reads per refresh: `/api/admin/stats` for the aggregates and `/payments` for
+ * the table. The table deliberately uses the public endpoint rather than a second
+ * aggregate — it already returns the full shape, and it supports filter and paging.
  */
 const { apiKey, api, restore, remember, forget } = useApi()
 
@@ -15,8 +16,21 @@ const notice = ref('')
 const busy = ref(false)
 const days = ref(14)
 
-const data = ref<any>({ summary: {}, daily: [], recent: [], session: {}, poll: {}, config: {}, uniqueCode: {} })
+const data = ref<any>({ summary: {}, daily: [], session: {}, poll: {}, config: {}, uniqueCode: {} })
+const rows = ref<any[]>([])
 const unmatched = ref<any[]>([])
+
+// Table controls
+const statusFilter = ref('')
+const searchTerm = ref('')
+const searchHit = ref<any>(null)
+const page = ref(0)
+const PAGE_SIZE = 15
+
+// Drawer + reconcile
+const selected = ref<any>(null)
+const reconciling = ref<any>(null)
+const reconcileTrxId = ref('')
 
 let timer: ReturnType<typeof setInterval> | null = null
 
@@ -24,11 +38,19 @@ async function load() {
   busy.value = true
   error.value = ''
   try {
-    const [stats, history] = await Promise.all([
+    const query = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      offset: String(page.value * PAGE_SIZE),
+    })
+    if (statusFilter.value) query.set('status', statusFilter.value)
+
+    const [stats, payments, history] = await Promise.all([
       api('GET', `/api/admin/stats?days=${days.value}`),
-      api('GET', '/history?matched=false&limit=15'),
+      api<any[]>('GET', `/payments?${query}`),
+      api<any[]>('GET', '/history?matched=false&limit=25'),
     ])
     data.value = stats
+    rows.value = payments
     unmatched.value = history
   } catch (e: any) {
     error.value = e.message
@@ -36,6 +58,44 @@ async function load() {
   } finally {
     busy.value = false
   }
+}
+
+/**
+ * Exact trxId lookup. Not a fuzzy search on purpose: what an operator actually has
+ * from a customer is the exact id, and `GET /payment/:trxId` answers it in one hop
+ * without a LIKE scan over the table.
+ */
+async function search() {
+  const term = searchTerm.value.trim()
+  searchHit.value = null
+  if (!term) return
+  busy.value = true
+  error.value = ''
+  try {
+    searchHit.value = await api('GET', `/payment/${encodeURIComponent(term)}`)
+  } catch (e: any) {
+    error.value = e.message === 'not found' ? `Transaksi "${term}" tidak ada` : e.message
+  } finally {
+    busy.value = false
+  }
+}
+
+function clearSearch() {
+  searchTerm.value = ''
+  searchHit.value = null
+  error.value = ''
+}
+
+function changeFilter() {
+  page.value = 0
+  load()
+}
+
+function turnPage(delta: number) {
+  const next = page.value + delta
+  if (next < 0) return
+  page.value = next
+  load()
 }
 
 async function login() {
@@ -92,6 +152,7 @@ const drain = () =>
 
 const cancel = (t: any) =>
   act(() => api('POST', `/payment/${encodeURIComponent(t.trxId)}/cancel`), () => `${t.trxId} dibatalkan`)
+    .then(() => { selected.value = null })
 
 const replay = (t: any) =>
   act(
@@ -99,12 +160,35 @@ const replay = (t: any) =>
     () => `Webhook ${t.trxId} dikirim ulang`,
   )
 
+/** Link an orphan payment to an order. The one action that can revive an EXPIRED order. */
+function startReconcile(payment: any) {
+  reconciling.value = payment
+  reconcileTrxId.value = ''
+  notice.value = ''
+  error.value = ''
+}
+
+const confirmReconcile = () => {
+  const payment = reconciling.value
+  const trxId = reconcileTrxId.value.trim()
+  if (!payment || !trxId) return
+  return act(
+    () => api('POST', '/api/admin/reconcile', { gobizId: payment.gobizId, trxId }),
+    (r) => {
+      const gap = r.difference === 0
+        ? 'nominalnya pas'
+        : `selisih ${r.difference > 0 ? 'lebih' : 'kurang'} ${rp(Math.abs(r.difference))}`
+      return `${r.trxId}: ${r.previousStatus} → ${r.status}, ${gap}. Webhook payment.paid dikirim.`
+    },
+  ).then(() => { reconciling.value = null })
+}
+
 // Auto-refresh only while the tab is visible. A hidden tab polling forever burns
 // invocations for nobody — and each refresh also drives a maintenance cycle.
 function start() {
   stop()
   timer = setInterval(() => {
-    if (!document.hidden) load()
+    if (!document.hidden && !selected.value && !reconciling.value) load()
   }, 20_000)
 }
 function stop() {
@@ -112,38 +196,57 @@ function stop() {
   timer = null
 }
 
+function onKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (reconciling.value) reconciling.value = null
+  else if (selected.value) selected.value = null
+}
+
 onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
   if (restore()) {
     authed.value = true
     load()
     start()
   }
 })
-onBeforeUnmount(stop)
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  stop()
+})
 
 const s = computed(() => data.value.summary || {})
 const p = computed(() => data.value.poll || {})
 const c = computed(() => data.value.config || {})
+const session = computed(() => data.value.session || {})
 
 const conversion = computed(() =>
   s.value.conversionRate == null ? '—' : `${Math.round(s.value.conversionRate * 100)}%`,
 )
 
 const sessionDot = computed(() =>
-  data.value.session?.ok === true ? 'ok' : data.value.session?.ok === false ? 'bad' : 'unknown',
+  session.value.ok === true ? 'ok' : session.value.ok === false ? 'bad' : 'unknown',
 )
 const sessionLabel = computed(() =>
-  data.value.session?.ok === true
+  session.value.ok === true
     ? 'sesi GoBiz aktif'
-    : data.value.session?.ok === false
+    : session.value.ok === false
       ? 'sesi GoBiz MATI'
       : 'sesi belum dicek',
 )
 
 /**
- * With no cron, detection rides on traffic. A long gap is not necessarily broken —
- * it can just mean nobody used the gateway — so say that rather than cry wolf.
+ * A GoBiz login cooldown is the one state where the fix is to do nothing. Retrying
+ * during it only deepens the rate-limit, so "check now" gets disabled outright.
  */
+const cooldown = computed(() => {
+  const secs = session.value.cooldownSeconds || 0
+  if (secs <= 0) return null
+  const m = Math.floor(secs / 60)
+  const sec = secs % 60
+  return { secs, text: m > 0 ? `${m}m ${sec}s` : `${sec}s`, until: session.value.cooldownUntil }
+})
+
 const pollNote = computed(() => {
   const stale = p.value.staleSeconds
   if (stale == null) {
@@ -169,13 +272,7 @@ useHead({ title: 'Admin — GoBiz Payment' })
 
       <form @submit.prevent="login">
         <label for="key" class="sr">API key</label>
-        <input
-          id="key"
-          v-model="keyInput"
-          type="password"
-          placeholder="API_KEY"
-          autocomplete="current-password"
-        >
+        <input id="key" v-model="keyInput" type="password" placeholder="API_KEY" autocomplete="current-password">
         <div v-if="loginError" class="banner bad" style="margin: 12px 0 0">{{ loginError }}</div>
         <button class="btn primary" style="width: 100%; margin-top: 12px" :disabled="busy">
           {{ busy ? 'Memeriksa…' : 'Masuk' }}
@@ -202,13 +299,27 @@ useHead({ title: 'Admin — GoBiz Payment' })
           <option :value="30">30 hari</option>
         </select>
         <button class="btn" :disabled="busy" @click="load()">{{ busy ? '…' : 'Refresh' }}</button>
-        <button class="btn primary" :disabled="busy" @click="pollNow">Cek pembayaran</button>
+        <button
+          class="btn primary"
+          :disabled="busy || !!cooldown"
+          :title="cooldown ? `GoBiz cooldown, tunggu ${cooldown.text}` : ''"
+          @click="pollNow"
+        >
+          Cek pembayaran
+        </button>
         <button class="btn" @click="logout">Keluar</button>
       </header>
 
       <div v-if="error" class="banner bad">{{ error }}</div>
       <div v-if="notice" class="banner ok">{{ notice }}</div>
-      <div v-if="pollNote" class="banner warn">{{ pollNote }}</div>
+
+      <div v-if="cooldown" class="banner bad">
+        <strong>GoBiz login di-cooldown {{ cooldown.text }}</strong> (sampai {{ clock(cooldown.until) }}).
+        Login berulang saat rate-limit justru memperpanjang blokir — tombol "Cek pembayaran"
+        dimatikan sampai selesai. Kalau ini karena kredensial salah, perbaiki
+        <code>GOPAY_EMAIL</code>/<code>GOPAY_PASSWORD</code> dulu.
+      </div>
+      <div v-else-if="pollNote" class="banner warn">{{ pollNote }}</div>
 
       <div class="grid tiles">
         <StatTile label="Pending" :value="s.pending ?? '—'" :sub="`${s.total ?? 0} transaksi total`" />
@@ -237,7 +348,46 @@ useHead({ title: 'Admin — GoBiz Payment' })
       <h2>Aktivitas {{ days }} hari</h2>
       <ActivityChart :days="data.daily || []" />
 
-      <h2>Transaksi terbaru</h2>
+      <!-- ── Search ────────────────────────────────────────────────────────── -->
+      <h2>Cari transaksi</h2>
+      <div class="card">
+        <form class="row" @submit.prevent="search">
+          <label for="q" class="sr">trxId</label>
+          <input
+            id="q"
+            v-model="searchTerm"
+            placeholder="trxId persis, mis. ORDER-1042 atau TRX-K3F9Q2A7X1B4"
+            style="flex: 1; min-width: 220px"
+          >
+          <button class="btn primary" :disabled="busy || !searchTerm.trim()">Cari</button>
+          <button v-if="searchHit || searchTerm" type="button" class="btn" @click="clearSearch">
+            Bersihkan
+          </button>
+        </form>
+
+        <div v-if="searchHit" class="row hit" @click="selected = searchHit">
+          <span class="pill" :class="searchHit.status">{{ searchHit.status }}</span>
+          <code>{{ searchHit.trxId }}</code>
+          <span class="mono">{{ rp(searchHit.amountToPay) }}</span>
+          <span class="muted mono" style="font-size: 12px">{{ clock(searchHit.createdAt) }}</span>
+          <span class="spacer" />
+          <span class="muted" style="font-size: 12px">klik untuk detail →</span>
+        </div>
+      </div>
+
+      <!-- ── Transactions ──────────────────────────────────────────────────── -->
+      <h2 class="row">
+        <span>Transaksi</span>
+        <span class="spacer" />
+        <label for="st" class="sr">Filter status</label>
+        <select id="st" v-model="statusFilter" @change="changeFilter">
+          <option value="">Semua status</option>
+          <option value="PENDING">PENDING</option>
+          <option value="PAID">PAID</option>
+          <option value="EXPIRED">EXPIRED</option>
+        </select>
+      </h2>
+
       <div class="card" style="padding: 15px 6px">
         <table>
           <thead>
@@ -252,21 +402,25 @@ useHead({ title: 'Admin — GoBiz Payment' })
             </tr>
           </thead>
           <tbody>
-            <tr v-for="t in data.recent" :key="t.trxId">
+            <tr v-for="t in rows" :key="t.trxId" class="clickable" @click="selected = t">
               <td class="mono">{{ t.trxId }}</td>
               <td><span class="pill" :class="t.status">{{ t.status }}</span></td>
-              <td class="num mono">{{ rp(t.payAmount) }}</td>
+              <td class="num mono">{{ rp(t.amountToPay) }}</td>
               <td class="num mono hide-sm">{{ t.uniqueCode ?? '—' }}</td>
               <td class="hide-sm muted" style="font-size: 12px">
-                {{ t.webhookState || '—' }}<template v-if="t.webhookAttempts"> ({{ t.webhookAttempts }}×)</template>
+                <template v-if="t.webhook">
+                  <span :class="{ bad: t.webhook.lastError }">{{ t.webhook.state }}</span>
+                  <template v-if="t.webhook.attempts"> ({{ t.webhook.attempts }}×)</template>
+                </template>
+                <template v-else>—</template>
               </td>
               <td class="hide-sm muted mono" style="font-size: 12px">{{ clock(t.createdAt) }}</td>
-              <td class="num">
+              <td class="num" @click.stop>
                 <button v-if="t.status === 'PENDING'" class="btn" :disabled="busy" @click="cancel(t)">
                   Batalkan
                 </button>
                 <button
-                  v-else-if="t.webhookState === 'PENDING'"
+                  v-else-if="t.webhook?.state === 'PENDING'"
                   class="btn"
                   :disabled="busy"
                   @click="replay(t)"
@@ -275,14 +429,32 @@ useHead({ title: 'Admin — GoBiz Payment' })
                 </button>
               </td>
             </tr>
-            <tr v-if="!data.recent?.length">
-              <td colspan="7" class="muted">Belum ada transaksi.</td>
+            <tr v-if="!rows.length">
+              <td colspan="7" class="muted">
+                {{ statusFilter ? `Tidak ada transaksi ${statusFilter}.` : 'Belum ada transaksi.' }}
+              </td>
             </tr>
           </tbody>
         </table>
+
+        <div class="row" style="margin: 12px 10px 2px">
+          <button class="btn" :disabled="busy || page === 0" @click="turnPage(-1)">← Sebelumnya</button>
+          <span class="muted" style="font-size: 12px">
+            Halaman {{ page + 1 }} · {{ rows.length }} baris
+          </span>
+          <span class="spacer" />
+          <button class="btn" :disabled="busy || rows.length < PAGE_SIZE" @click="turnPage(1)">
+            Berikutnya →
+          </button>
+        </div>
       </div>
 
+      <!-- ── Unmatched payments ────────────────────────────────────────────── -->
       <h2>Pembayaran masuk belum kecocokan</h2>
+      <p v-if="unmatched.length" class="muted" style="font-size: 12px; margin: -4px 0 11px">
+        Duitnya sudah masuk tapi nominalnya tidak cocok ke order mana pun. Tautkan manual
+        supaya order-nya jadi <code>PAID</code> dan webhook-nya terkirim.
+      </p>
       <div class="card" style="padding: 15px 6px">
         <table>
           <thead>
@@ -291,6 +463,7 @@ useHead({ title: 'Admin — GoBiz Payment' })
               <th class="num">Nominal</th>
               <th class="hide-sm">Waktu GoBiz</th>
               <th class="hide-sm">Diarsip</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -299,14 +472,18 @@ useHead({ title: 'Admin — GoBiz Payment' })
               <td class="num mono">{{ rp(h.amount) }}</td>
               <td class="hide-sm muted" style="font-size: 12px">{{ h.time || '—' }}</td>
               <td class="hide-sm muted mono" style="font-size: 12px">{{ clock(h.seenAt) }}</td>
+              <td class="num">
+                <button class="btn" :disabled="busy" @click="startReconcile(h)">Tautkan…</button>
+              </td>
             </tr>
             <tr v-if="!unmatched.length">
-              <td colspan="4" class="muted">Semua pembayaran cocok ke order. 🎉</td>
+              <td colspan="5" class="muted">Semua pembayaran cocok ke order. 🎉</td>
             </tr>
           </tbody>
         </table>
       </div>
 
+      <!-- ── System ────────────────────────────────────────────────────────── -->
       <h2>Sistem</h2>
       <div class="card grid" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px">
         <div>
@@ -329,8 +506,14 @@ useHead({ title: 'Admin — GoBiz Payment' })
           <div class="mono"><span class="dot" :class="sessionDot" />{{ sessionLabel }}</div>
         </div>
         <div>
+          <div class="label">Cooldown login</div>
+          <div class="mono" :class="{ bad: cooldown }">
+            {{ cooldown ? `${cooldown.text} lagi` : 'tidak aktif' }}
+          </div>
+        </div>
+        <div>
           <div class="label">Re-auth</div>
-          <div class="mono">{{ data.session?.reauths ?? 0 }}×</div>
+          <div class="mono">{{ session.reauths ?? 0 }}×</div>
         </div>
         <div>
           <div class="label">Webhook global</div>
@@ -346,13 +529,76 @@ useHead({ title: 'Admin — GoBiz Payment' })
         </div>
       </div>
 
-      <p v-if="data.session?.lastError" class="muted" style="font-size: 12px; margin-top: 10px">
-        Error sesi terakhir: <code>{{ data.session.lastError }}</code>
+      <p v-if="session.lastError" class="muted" style="font-size: 12px; margin-top: 10px">
+        Error sesi terakhir: <code>{{ session.lastError }}</code>
       </p>
+
+      <!-- ── Overlays ──────────────────────────────────────────────────────── -->
+      <TrxDetail
+        :trx="selected"
+        @close="selected = null"
+        @cancel="cancel"
+        @replay="replay"
+      />
+
+      <div v-if="reconciling" class="backdrop" @click.self="reconciling = null">
+        <div class="card modal" role="dialog" aria-modal="true" aria-label="Tautkan pembayaran">
+          <h1 style="font-size: 15px">Tautkan pembayaran ke order</h1>
+          <p class="muted" style="font-size: 13px; margin: 8px 0 14px">
+            <code>{{ reconciling.gobizId }}</code> · <strong>{{ rp(reconciling.amount) }}</strong>
+            masuk {{ reconciling.time || clock(reconciling.seenAt) }}.
+          </p>
+
+          <form @submit.prevent="confirmReconcile">
+            <label for="rid" class="label">trxId order tujuan</label>
+            <input id="rid" v-model="reconcileTrxId" placeholder="ORDER-1042" style="margin-top: 5px">
+
+            <div class="banner warn" style="margin: 14px 0 0">
+              Order akan ditandai <strong>PAID</strong> walaupun statusnya sudah
+              <code>EXPIRED</code>, dan webhook <code>payment.paid</code> dikirim. Kalau
+              consumer-mu sudah menerima <code>payment.expired</code> untuk order ini,
+              dia akan menerima <code>payment.paid</code> sesudahnya — pastikan
+              handler-mu tahan urutan itu. Tidak bisa dibatalkan.
+            </div>
+
+            <div class="row" style="margin-top: 14px">
+              <button class="btn primary" :disabled="busy || !reconcileTrxId.trim()">
+                Tautkan &amp; tandai PAID
+              </button>
+              <button type="button" class="btn" @click="reconciling = null">Batal</button>
+            </div>
+          </form>
+        </div>
+      </div>
     </template>
   </div>
 </template>
 
 <style scoped>
 .login { max-width: 380px; margin: 15vh auto; }
+
+.clickable { cursor: pointer; }
+
+.hit {
+  margin-top: 13px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.hit:hover { border-color: var(--accent); }
+
+.bad { color: var(--bad); }
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 60;
+}
+.modal { width: min(500px, 100%); }
 </style>

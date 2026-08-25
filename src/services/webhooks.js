@@ -10,7 +10,7 @@ function backoffMs(attempt) {
    return Math.min(30_000 * 2 ** Math.max(0, attempt - 1), config.webhook.maxBackoffMs);
 }
 
-export function buildPayload(trx) {
+function buildPayload(trx) {
    return {
       event: trx.status === 'PAID' ? 'payment.paid' : 'payment.expired',
       trxId: trx.trxId,
@@ -84,7 +84,7 @@ export async function deliver(trx) {
  *
  * The inline attempt is awaited rather than fired and forgotten: a serverless
  * instance is frozen the moment the response is sent, so a floating promise would
- * be killed mid-flight. Failures are already persisted, so the cron sweep picks
+ * be killed mid-flight. Failures are already persisted, so the next cycle picks
  * them up regardless.
  */
 export async function enqueue(trx) {

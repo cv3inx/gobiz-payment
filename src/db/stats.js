@@ -84,19 +84,3 @@ export async function daily(days = 14) {
       };
    });
 }
-
-/** Recent activity feed: newest transactions with just what a table needs. */
-export async function recent(limit = 15) {
-   const rows = await all(`
-      SELECT "trxId", status, amount, fee, "payAmount", "uniqueCode",
-             "createdAt", "paidAt", "expiresAt", "webhookState", "webhookAttempts"
-      FROM transactions ORDER BY "createdAt" DESC LIMIT $1
-   `, [limit]);
-   return rows.map((r) => ({
-      ...r,
-      amount: Number(r.amount),
-      fee: Number(r.fee),
-      payAmount: Number(r.payAmount),
-      uniqueCode: r.uniqueCode == null ? null : Number(r.uniqueCode),
-   }));
-}

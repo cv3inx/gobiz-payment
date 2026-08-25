@@ -2,7 +2,7 @@ import express from 'express';
 import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { log } from '../logger.js';
-import { validateWebhookUrl } from '../security.js';
+import { validateWebhookUrl, isAuthenticated } from '../security.js';
 import * as transactions from '../db/transactions.js';
 import * as webhookStore from '../db/webhooks.js';
 import * as payments from '../services/payments.js';
@@ -161,16 +161,32 @@ export function paymentRoutes(guard, merchant = null) {
       // No timers exist to fire expiry, so settle it here rather than reporting a
       // PENDING transaction that is actually long dead.
       const trx = await payments.expireIfOverdue(found);
-      // Unauthenticated on purpose — the payer needs to poll this. Note it also
-      // returns metadata/callbackUrl, so a guessable caller-supplied trxId
-      // ("ORDER-1042") exposes them; use the auto-generated id for public flows.
-      res.json({ success: true, data: payments.toPublic(trx, baseUrlFor(req)) });
+      const full = payments.toPublic(trx, baseUrlFor(req));
+
+      // Unauthenticated on purpose — the payer has to poll this. But a
+      // caller-supplied trxId can be guessable ("ORDER-1042"), so the merchant's
+      // own fields are held back unless the request carries the API key. The payer
+      // gets what they need to pay and nothing about the merchant's bookkeeping.
+      if (isAuthenticated(req, config.apiKey)) {
+         return res.json({ success: true, data: full });
+      }
+      const { metadata, callbackUrl, webhook, ...payerView } = full;
+      res.json({ success: true, data: payerView });
    }));
 
    router.get('/payment/:trxId/qr.png', wrap(async (req, res) => {
       const trx = await transactions.get(req.params.trxId);
-      if (!trx) return fail(res, 404, 'not found');
+      if (!trx) {
+         // Never cache a miss: the id may exist a second later.
+         res.setHeader('Cache-Control', 'no-store');
+         return fail(res, 404, 'not found');
+      }
       const png = await QRCode.toBuffer(trx.qrString, { scale: 8, errorCorrectionLevel: 'M' });
+      // The QR encodes a fixed payable amount, so for a given trxId these bytes
+      // never change. Letting the CDN keep them takes the payer's repeated page
+      // loads off the function entirely — the single biggest cost saving here,
+      // since rendering a PNG is the most expensive thing this API does.
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       res.type('png').send(png);
    }));
 
@@ -193,7 +209,7 @@ export function paymentRoutes(guard, merchant = null) {
 
       await webhookStore.owe(trx.trxId);
       // Awaited: a floating promise would be killed the moment this response is
-      // sent and the instance is frozen. A failure is persisted, so the cron
+      // sent and the instance is frozen. A failure is persisted, so the next
       // sweep retries it anyway.
       try {
          await webhooks.deliver(await transactions.get(trx.trxId));

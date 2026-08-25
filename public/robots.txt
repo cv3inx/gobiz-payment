@@ -1,0 +1,5 @@
+# A payment gateway has nothing to index: /admin is an operator tool, /docs
+# describes an API that needs a key, and a payment status URL is nobody's business
+# but the payer's.
+User-agent: *
+Disallow: /

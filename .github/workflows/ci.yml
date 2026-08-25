@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      # No services block: the suite runs against PGlite (Postgres compiled to
+      # WASM, in-process), so it needs no database container and no secrets.
+      - run: npm ci
+      - run: npm test
+
+      # The build is the other half of the contract — it is where Vue templates are
+      # compiled, so a broken component fails here rather than in production.
+      - run: npx nuxt build
+        env:
+          QRIS_STRING: '00020101021126001180002ID5802ID540520006304ABCD'

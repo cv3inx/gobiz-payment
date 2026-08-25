@@ -8,11 +8,11 @@ const KEY = 'session.health';
  * Tracks whether the GoBiz session is alive.
  *
  * The state lives in the database, not in a module variable: the request that
- * serves /health almost never runs in the same instance as the cron invocation
+ * serves /health almost never runs in the same instance as the request
  * that probed upstream, so in-process state would report "unknown" forever.
  *
  * The probe itself is deliberately cheap (a 1-record merchant lookup, not a
- * history fetch) and only runs on the cron tick — probing per request would
+ * history fetch) and only runs on the full cycle — probing per request would
  * multiply upstream calls by traffic and risk an account block.
  */
 const EMPTY = {

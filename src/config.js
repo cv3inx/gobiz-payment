@@ -35,8 +35,6 @@ export const config = Object.freeze({
    databaseUrl: str('DATABASE_URL'),
    qrisString: str('QRIS_STRING'),
 
-   sessionCheckMs: int('SESSION_CHECK_MS', 30_000),
-
    // Floor between upstream polls, shared across instances. Reading a PENDING
    // payment's status is allowed to drive a poll, so this is what stands between
    // a busy checkout page and a rate-limited GoBiz account. Below 7s risks a block.

@@ -56,8 +56,6 @@ export function log(scope = 'app') {
    };
 }
 
-// Expose level palette so the HTTP request logger (morgan) can match the style.
-export const LEVEL_META = LEVELS;
 export { useColor, dim, fg, style, bold, badge, padScope, ts };
 
 export default log;

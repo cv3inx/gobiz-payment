@@ -20,7 +20,7 @@ const SEEDED_KEY = 'poller.seeded';
  * Two overlapping passes reconciling the same entry is harmless: `settle()` is
  * guarded on status = 'PENDING', so only one wins and only one webhook fires.
  */
-export async function pollOnce(merchant) {
+async function pollOnce(merchant) {
    const entries = (await merchant.getHistory({ days: 1, size: 30 }))
       .filter((e) => Number.isFinite(e.amount));
 

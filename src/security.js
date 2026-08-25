@@ -26,6 +26,33 @@ export function securityHeaders(req, res, next) {
    next();
 }
 
+/** The key this request presented, from `X-API-Key` or `Authorization: Bearer`. */
+function presentedKey(req) {
+   const headerKey = req.get('x-api-key') || '';
+   const auth = req.get('authorization') || '';
+   const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+   return headerKey || bearer;
+}
+
+/**
+ * Does this request carry the API key? Never blocks.
+ *
+ * For endpoints that must answer unauthenticated callers but should reveal more to
+ * the operator — the payer polling a payment status has no business seeing the
+ * merchant's `metadata`.
+ *
+ * With no `apiKey` configured everything is already open, so this reports true and
+ * the caller's own startup warning is the thing that matters.
+ *
+ * @param {import('express').Request} req
+ * @param {string|null} apiKey
+ */
+export function isAuthenticated(req, apiKey) {
+   if (!apiKey) return true;
+   const provided = presentedKey(req);
+   return !!provided && safeEqual(provided, apiKey);
+}
+
 /**
  * API-key guard (timing-safe). Reads the `X-API-Key` header. No-op if apiKey
  * is falsy. Also accepts `Authorization: Bearer <key>` as a fallback.
@@ -34,11 +61,7 @@ export function securityHeaders(req, res, next) {
 export function requireApiKey(apiKey) {
    return (req, res, next) => {
       if (!apiKey) return next();
-      const headerKey = req.get('x-api-key') || '';
-      const auth = req.get('authorization') || '';
-      const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-      const provided = headerKey || bearer;
-      if (provided && safeEqual(provided, apiKey)) return next();
+      if (isAuthenticated(req, apiKey)) return next();
       return res.status(401).json({ success: false, error: 'unauthorized' });
    };
 }

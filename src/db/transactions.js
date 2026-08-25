@@ -62,7 +62,7 @@ export const getByIdempotencyKey = async (key) =>
 export const listPending = async () =>
    (await all(`SELECT * FROM transactions WHERE status = 'PENDING'`)).map(parse);
 
-/** PENDING transactions already past their expiry — the cron sweep's work list. */
+/** PENDING transactions already past their expiry — the expiry sweep's work list. */
 export const listExpired = async (now = new Date().toISOString(), limit = 500) =>
    (await all(
       `SELECT * FROM transactions WHERE status = 'PENDING' AND "expiresAt" <= $1
@@ -96,6 +96,27 @@ export async function settle(trx) {
          trx.paidAt ?? null,
          trx.entry != null ? JSON.stringify(trx.entry) : null,
       ],
+   ) > 0;
+}
+
+/**
+ * Force a transaction to PAID regardless of its current status.
+ *
+ * Only for operator-driven reconciliation: the money provably arrived but the
+ * amount never matched, so the order may well already be EXPIRED. `settle()` is
+ * guarded on PENDING precisely to stop this happening automatically — this is the
+ * deliberate exception, and it stays out of every automatic path.
+ *
+ * Guarded on `status <> 'PAID'` so reconciling twice is a no-op and cannot fire a
+ * second webhook.
+ *
+ * @returns {Promise<boolean>} false if it was already PAID
+ */
+export async function forcePaid({ trxId, paidAt, entry = null }) {
+   return await changed(
+      `UPDATE transactions SET status = 'PAID', "paidAt" = $2, entry = $3
+       WHERE "trxId" = $1 AND status <> 'PAID'`,
+      [trxId, paidAt, entry != null ? JSON.stringify(entry) : null],
    ) > 0;
 }
 

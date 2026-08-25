@@ -124,7 +124,7 @@ Response `201`:
     "uniqueCode": 137,
     "amountToPay": 52637,
     "qrString": "00020101021226...",
-    "qrImageUrl": "https://pay.example.com/payment/TRX-K3F9Q2A7X1/qr.png",
+    "qrImageUrl": "https://pay.violetics.id/payment/TRX-K3F9Q2A7X1/qr.png",
     "callbackUrl": "https://shop.example.com/hook",
     "metadata": { "orderId": 1042 },
     "createdAt": "2026-07-10T12:24:56.000Z",
@@ -179,7 +179,7 @@ anything else → `400`). `limit` clamped to 1..200 (default 50), `offset` ≥ 0
 
 - `webhooksOwed` > 0 — events queued for redelivery, usually a consumer that is down.
 - `uniqueCodeCursor` — last unique code handed out.
-- `session` — GoBiz upstream session, probed every `SESSION_CHECK_MS` (default 30s).
+- `session` — GoBiz upstream session, probed on each full cycle.
   `reauths` counts how often the token was silently refreshed.
 
 Returns **`503`** with `success: false` when `session.ok` is `false`. Payments cannot
@@ -192,7 +192,7 @@ The session is probed on each cycle, not per request — probing per request wou
 multiply upstream calls by traffic. Session health is stored in the `meta` table,
 because the instance serving `/health` is almost never the one that ran the probe. On
 top of that a cheap probe (a 1-record merchant lookup, not a history fetch) runs
-every `SESSION_CHECK_MS` to:
+on each full cycle to:
 
 - detect an expired token **before** a payment poll trips over it,
 - re-authenticate automatically when it has expired,
@@ -201,7 +201,7 @@ every `SESSION_CHECK_MS` to:
 A failed login puts GoBiz into a ~15 minute cooldown; during that window the probe
 logs at `info` and keeps `/health` at `503` rather than hammering the endpoint.
 
-> Do not lower `POLL_MIN_INTERVAL_MS` or `SESSION_CHECK_MS` below their defaults — aggressive
+> Do not lower `POLL_MIN_INTERVAL_MS` below its default — aggressive
 > polling of GoBiz's internal API risks the merchant account being blocked. The
 > server warns at boot if you do.
 
@@ -286,16 +286,77 @@ Envelope: `{ "success": false, "error": "message" }`.
 
 `amount` and `fee` must each be ≤ `MAX_AMOUNT` (default Rp 1,000,000,000).
 
+## Manual reconciliation
+
+`POST /api/admin/reconcile { gobizId, trxId }`
+
+Automatic matching keys on the payable amount, so it cannot help when the amount is
+wrong — a payer who typed the figure themselves, or who paid after the order expired.
+The money is in `gobiz_history` with `matchedTrxId: null` (`GET /history?matched=false`)
+and no order will ever claim it.
+
+This endpoint claims the payment, marks the order **PAID even if it is EXPIRED**, sends
+`payment.paid`, and logs `MANUAL RECONCILE <trxId> (EXPIRED → PAID) ... difference=-7`.
+
+It is the only path allowed through the `status = 'PENDING'` guard. Everything else —
+the automatic reconciler, the expiry sweep — goes through `settle()` and cannot revive a
+settled order. Two safeguards keep it honest:
+
+- the payment is linked with `WHERE "matchedTrxId" IS NULL`, so one incoming payment can
+  never be pointed at two orders
+- the order is settled with `WHERE status <> 'PAID'`, so reconciling twice is a `409` and
+  sends no second webhook
+
+**Consumers must tolerate `payment.expired` followed by `payment.paid` for the same
+`trxId`.** That sequence is the normal shape of a recovered payment.
+
+## Two-shape responses
+
+`GET /payment/{trxId}` and `GET /health` must stay open — the payer polls one, an
+uptime monitor polls the other — so what they *return* is what gets restricted:
+
+| Endpoint | Anonymous | With `X-API-Key` |
+|---|---|---|
+| `GET /payment/{trxId}` | `trxId`, `status`, `amount`, `fee`, `uniqueCode`, `amountToPay`, `qrString`, `qrImageUrl`, `createdAt`, `expiresAt`, `paidAt` | adds `metadata`, `callbackUrl`, `webhook` |
+| `GET /health` | `session` | adds `pending`, `total`, `webhooksOwed`, `uniqueCodeCursor` |
+
+A caller-supplied `trxId` is often guessable (`ORDER-1042`), so the merchant's
+`metadata` and webhook diagnostics cannot ride along on the public shape. And an open
+`/health` publishing `total: 128` lets anyone measure the merchant's trade volume.
+
+Merchant tooling that sends the key sees exactly what it always did.
+
+## Caching
+
+`GET /payment/{trxId}/qr.png` sets `Cache-Control: public, max-age=31536000,
+immutable`. The QR encodes one fixed payable amount, so for a given `trxId` the bytes
+can never change, and rendering a PNG is the most expensive thing this API does — the
+CDN absorbing a payer's repeated page loads is the single biggest saving available.
+A 404 is `no-store`, since the id may exist a moment later.
+
+Everything else is uncached: a payment status that a CDN held for even a second would
+be worse than useless.
+
+## Storage growth
+
+Nothing is ever deleted, deliberately — these are financial records. At roughly 1 KB
+per transaction, Neon's free 0.5 GB holds on the order of 500k transactions, and the
+`gobiz_history` archive grows at the rate money actually arrives. If you outgrow it,
+archive out to cold storage rather than adding an automatic purge: a job that deletes
+paid orders is one bug away from destroying the audit trail.
+
 ## Security notes
 
 - Set `WEBHOOK_SECRET` and `API_KEY` to strong random values in production. With
   `NODE_ENV=production` the server **refuses to boot** while `WEBHOOK_SECRET` is
   still the default `change-me`; a missing `API_KEY` logs a warning (write
   endpoints are open).
-- Put the gateway behind HTTPS (reverse proxy). `trust proxy` trusts `TRUST_PROXY`
-  hops of `X-Forwarded-For` (default `1`). Do not set it to `true` — that takes
-  the client's own XFF at face value, letting anyone forge an IP and evade the
-  per-IP rate limit. Match it to your actual number of proxies.
+- `trust proxy` trusts `TRUST_PROXY` hops of `X-Forwarded-For` (default `1`, which
+  is correct for Vercel alone). Do not set it to `true` — that takes the client's own
+  XFF at face value, letting anyone forge an IP and evade the per-IP rate limit.
+  **Match it to the actual number of proxies:** a Cloudflare-proxied (orange cloud)
+  record in front of Vercel is two hops, so it needs `TRUST_PROXY=2`. Leave the
+  record on "DNS only" and `1` stays correct.
 - Postgres holds transaction history, the GoBiz token, and merchant ID — back it up, restrict network access.
 - `POST /api/admin/poll` is the only way to force a cycle and it sits behind
   `API_KEY`. Leaving `API_KEY` unset makes it open, which lets anyone drive the

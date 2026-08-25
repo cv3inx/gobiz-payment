@@ -1,4 +1,4 @@
-import { all, sql } from './index.js';
+import { all, one, sql, changed } from './index.js';
 import { clampPage } from './transactions.js';
 
 /**
@@ -33,6 +33,27 @@ export async function seen(gobizIds) {
       [gobizIds.map(String)],
    );
    return new Set(rows.map((r) => r.gobizId));
+}
+
+export async function getById(gobizId) {
+   const row = await one(`SELECT * FROM gobiz_history WHERE "gobizId" = $1`, [String(gobizId)]);
+   return row ? { ...row, amount: Number(row.amount) } : null;
+}
+
+/**
+ * Attach an order to an archived payment, but only if nothing is attached yet.
+ *
+ * The `IS NULL` guard is what stops two operators (or a double-click) from
+ * pointing the same incoming payment at two different orders.
+ *
+ * @returns {Promise<boolean>} false if it was already linked
+ */
+export async function linkIfUnmatched(gobizId, trxId) {
+   return await changed(
+      `UPDATE gobiz_history SET "matchedTrxId" = $2
+       WHERE "gobizId" = $1 AND "matchedTrxId" IS NULL`,
+      [String(gobizId), trxId],
+   ) > 0;
 }
 
 /** matched: true = only linked, false = only unlinked, null = all. */

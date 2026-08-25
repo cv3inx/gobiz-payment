@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { createSuite } from './helpers.js';
-import { safeEqual, signBody, verifyWebhookSignature, validateWebhookUrl } from '../src/security.js';
+import { safeEqual, signBody, verifyWebhookSignature, validateWebhookUrl, isAuthenticated } from '../src/security.js';
 
 const { test, report } = createSuite('security');
 
@@ -42,6 +42,24 @@ test('blocks internal hosts, bad schemes, and credentials (SSRF)', () => {
       'http://user:pass@example.com/x', 'not a url',
    ];
    for (const url of blocked) assert.ok(!validateWebhookUrl(url).ok, `${url} rejected`);
+});
+
+test('isAuthenticated reads both header forms without blocking', () => {
+   const req = (headers) => ({ get: (h) => headers[h.toLowerCase()] ?? '' });
+   assert.ok(isAuthenticated(req({ 'x-api-key': 'k' }), 'k'), 'X-API-Key');
+   assert.ok(isAuthenticated(req({ authorization: 'Bearer k' }), 'k'), 'Bearer');
+   assert.ok(!isAuthenticated(req({ 'x-api-key': 'wrong' }), 'k'));
+   assert.ok(!isAuthenticated(req({}), 'k'), 'no credentials');
+   assert.ok(!isAuthenticated(req({ authorization: 'Basic k' }), 'k'), 'wrong scheme');
+});
+
+test('isAuthenticated reports true when no key is configured', () => {
+   // Nothing is protected in that case, so pretending otherwise would hide fields
+   // from an operator who has no way to authenticate at all. The startup warning
+   // about an unset API_KEY is what covers this.
+   const req = { get: () => '' };
+   assert.ok(isAuthenticated(req, null));
+   assert.ok(isAuthenticated(req, ''));
 });
 
 process.exit(await report() ? 0 : 1);

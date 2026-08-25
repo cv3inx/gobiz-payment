@@ -49,9 +49,11 @@ async function connect() {
 /**
  * Transport-level failures, as opposed to "your SQL was wrong".
  *
- * A serverless Postgres (Neon, Supabase) autosuspends when idle, and the
- * connection that wakes it can time out or be dropped. That is not a real error —
- * retrying reaches a live database. Retrying a *query* error would just repeat it.
+ * These happen for several unrelated reasons and none of them mean the query was
+ * bad: a managed Postgres hostname resolves to several addresses and not all are
+ * reachable from every network, a transaction-mode pooler recycles backends under
+ * it, and a scale-to-zero instance can drop the connection that wakes it. Retrying
+ * gets a live socket. Retrying a *query* error would just repeat the same error.
  */
 const TRANSIENT = new Set([
    'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN',
@@ -120,7 +122,7 @@ export async function close() {
 // Applied by `npm run migrate` (and by tests on a fresh database). Idempotent,
 // but NOT run on every cold start — DDL on each invocation would burn latency
 // and race with itself.
-export const SCHEMA = `
+const SCHEMA = `
    CREATE TABLE IF NOT EXISTS transactions (
       "trxId"            TEXT PRIMARY KEY,
       status             TEXT NOT NULL,
@@ -157,7 +159,7 @@ export const SCHEMA = `
    CREATE INDEX IF NOT EXISTS idx_webhook_due
       ON transactions("webhookNextAt") WHERE "webhookState" = 'PENDING';
 
-   -- Pending transactions past their expiry, found by the cron sweep.
+   -- Pending transactions past their expiry, found by the sweep in runCycle().
    CREATE INDEX IF NOT EXISTS idx_pending_expiry
       ON transactions("expiresAt") WHERE status = 'PENDING';
 
@@ -174,8 +176,8 @@ export const SCHEMA = `
    CREATE INDEX IF NOT EXISTS idx_hist_matched ON gobiz_history("matchedTrxId");
    CREATE INDEX IF NOT EXISTS idx_hist_seen ON gobiz_history("seenAt" DESC);
 
-   -- Key-value: GoBiz token cache (no filesystem in serverless), session health,
-   -- and the watcher's seen-transaction set.
+   -- Key-value: GoBiz token cache (no filesystem in serverless), login cooldown,
+   -- session health, and the global poll throttle.
    CREATE TABLE IF NOT EXISTS meta (
       key   TEXT PRIMARY KEY,
       value JSONB NOT NULL

@@ -20,8 +20,6 @@ export const set = async (key, value) => {
    );
 };
 
-export const del = async (key) => { await sql(`DELETE FROM meta WHERE key = $1`, [key]); };
-
 /** Merge into an existing object value instead of replacing it. */
 export const patch = async (key, fields) => {
    await sql(

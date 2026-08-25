@@ -48,10 +48,11 @@ const call = async (method, path, { headers = AUTH, body } = {}) => {
       body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
    });
    const text = await res.text();
+   const meta = { status: res.status, type: res.headers.get('content-type'), cache: res.headers.get('cache-control') };
    try {
-      return { status: res.status, body: JSON.parse(text), type: res.headers.get('content-type') };
+      return { ...meta, body: JSON.parse(text) };
    } catch {
-      return { status: res.status, body: text, type: res.headers.get('content-type') };
+      return { ...meta, body: text };
    }
 };
 
@@ -104,7 +105,10 @@ results.sequential = [];
 for (let i = 0; i < 3; i++) results.sequential.push((await create({ amount: 33_000 })).body.data.uniqueCode);
 
 results.status = await call('GET', `/payment/${trxId}`);
+results.statusPublic = await call('GET', `/payment/${trxId}`, { headers: {} });
 results.qr = await call('GET', `/payment/${trxId}/qr.png`);
+results.qrMiss = await call('GET', '/payment/NOPE-NOT-A-TRX/qr.png');
+results.healthPublic = await call('GET', '/health', { headers: {} });
 results.list = await call('GET', '/payments?limit=-1');
 results.health = await call('GET', '/health');
 results.history = await call('GET', '/history');
@@ -281,6 +285,41 @@ test('status, QR image, and health all respond', () => {
    assert.ok(typeof results.health.body.data.uniqueCodeCursor === 'number');
    assert.ok(results.health.body.data.session, 'reports session health');
    assert.strictEqual(results.history.status, 200);
+});
+
+test('the public status view withholds the merchant\'s own fields', () => {
+   // A caller-supplied trxId can be guessable, and this endpoint has to stay open
+   // for the payer. So the payer gets what they need to pay and nothing else.
+   const pub = results.statusPublic.body.data;
+   assert.strictEqual(results.statusPublic.status, 200, 'still open to the payer');
+   assert.strictEqual(pub.amountToPay, results.created.body.data.amountToPay, 'can still pay');
+   assert.ok(pub.qrString && pub.status && pub.expiresAt, 'has what a payer needs');
+   for (const leak of ['metadata', 'callbackUrl', 'webhook']) {
+      assert.ok(!(leak in pub), `${leak} must not be public`);
+   }
+   // The authenticated view is unchanged, so merchant tooling keeps its contract.
+   const priv = results.status.body.data;
+   assert.deepStrictEqual(priv.metadata, { orderId: 1 }, 'API key still sees metadata');
+   assert.ok('webhook' in priv && 'callbackUrl' in priv);
+});
+
+test('public /health reports liveness but not trade volume', () => {
+   // "pending: 3, total: 128" on an open endpoint tells anyone how much business
+   // this merchant does.
+   const pub = results.healthPublic.body.data;
+   assert.strictEqual(results.healthPublic.status, 200);
+   assert.ok(pub.session, 'still usable by an uptime monitor');
+   for (const leak of ['pending', 'total', 'webhooksOwed', 'uniqueCodeCursor']) {
+      assert.ok(!(leak in pub), `${leak} must not be public`);
+   }
+});
+
+test('the QR is cached by the CDN, and a miss is not', () => {
+   // Rendering a PNG is the most expensive thing this API does, and for a given
+   // trxId the bytes never change.
+   assert.match(results.qr.cache, /immutable/, 'hit is cacheable forever');
+   assert.strictEqual(results.qrMiss.status, 404);
+   assert.match(results.qrMiss.cache, /no-store/, 'a miss must never be cached');
 });
 
 test('a cycle reconciles a matching payment and marks it PAID', () => {

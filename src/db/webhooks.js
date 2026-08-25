@@ -63,7 +63,7 @@ export async function due({ maxAttempts = 12, limit = 20, now = new Date().toISO
 /**
  * Atomically take ownership of up to `limit` due webhooks.
  *
- * Two cron invocations can overlap (a slow run plus the next tick), and both
+ * Two cycles can overlap (concurrent requests both claiming the slot), and both
  * would otherwise deliver the same event twice. A single UPDATE ... RETURNING is
  * atomic, so pushing "webhookNextAt" out to a lease makes the claimed rows stop
  * matching the other worker's "due" filter. If this instance dies mid-delivery

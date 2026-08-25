@@ -32,7 +32,7 @@ const Transaction = {
          description: 'The single number the payer transfers = amount + fee + uniqueCode. Match key; the QR encodes this.',
       },
       qrString: { type: 'string', example: '00020101021226...5802ID...6304ABCD', description: 'Dynamic QRIS payload' },
-      qrImageUrl: { type: 'string', example: 'https://pay.example.com/payment/TRX-K3F9Q2A7X1B4/qr.png' },
+      qrImageUrl: { type: 'string', example: 'https://pay.violetics.id/payment/TRX-K3F9Q2A7X1B4/qr.png' },
       callbackUrl: { type: 'string', nullable: true, example: 'https://shop.example.com/hook' },
       metadata: { nullable: true, example: { orderId: 1042 } },
       createdAt: { type: 'string', format: 'date-time', example: '2026-07-10T12:24:56.000Z' },
@@ -58,7 +58,7 @@ const Transaction = {
       uniqueCode: 137,
       amountToPay: 52637,
       qrString: '00020101021226...5802ID...6304ABCD',
-      qrImageUrl: 'https://pay.example.com/payment/TRX-K3F9Q2A7X1B4/qr.png',
+      qrImageUrl: 'https://pay.violetics.id/payment/TRX-K3F9Q2A7X1B4/qr.png',
       callbackUrl: 'https://shop.example.com/hook',
       metadata: { orderId: 1042 },
       createdAt: '2026-07-10T12:24:56.000Z',
@@ -198,6 +198,15 @@ export const openApiSpec = {
       '/payment/{trxId}': {
          get: {
             summary: 'Check payment by trxId',
+            description: 'Open to the payer, so it returns **two different shapes**.\n\n' +
+               'Without the API key: only what a payer needs — `status`, `amountToPay`, ' +
+               '`qrString`, `expiresAt`, `paidAt`. `metadata`, `callbackUrl` and `webhook` are ' +
+               'withheld, because a caller-supplied `trxId` like `ORDER-1042` is guessable.\n\n' +
+               'With the API key: the full object.\n\n' +
+               'Reading a PENDING transaction also drives a globally throttled upstream poll — ' +
+               'this is what detects payments, so expect the extra latency when the throttle ' +
+               'is open.',
+            security: [{}, { ApiKeyAuth: [] }],
             parameters: [{ name: 'trxId', in: 'path', required: true, schema: { type: 'string' } }],
             responses: {
                200: { description: 'OK', content: { 'application/json': { schema: ok({ $ref: '#/components/schemas/Transaction' }) } } },
@@ -208,6 +217,9 @@ export const openApiSpec = {
       '/payment/{trxId}/qr.png': {
          get: {
             summary: 'QRIS image (PNG)',
+            description: 'Served `Cache-Control: public, max-age=31536000, immutable` — the ' +
+               'payable amount is fixed, so these bytes never change for a given trxId and the ' +
+               'CDN can keep them. A 404 is `no-store`.',
             parameters: [{ name: 'trxId', in: 'path', required: true, schema: { type: 'string' } }],
             responses: {
                200: { description: 'PNG image', content: { 'image/png': {} } },
@@ -270,9 +282,12 @@ export const openApiSpec = {
       '/api/admin/stats': {
          get: {
             summary: 'Dashboard aggregates: counts, revenue windows, daily series, recent feed',
-            description: 'Everything the /admin dashboard renders, in one round trip. ' +
-               '`poll.staleSeconds` is the number to watch — it says how long ago payment ' +
-               'detection last ran, so a dead external scheduler is visible immediately.',
+            description: 'Aggregates for the /admin dashboard. The transaction table comes from ' +
+               '`/payments` instead, so the feed has exactly one source.\n\n' +
+               '`poll.staleSeconds` says how long ago payment detection last ran. ' +
+               '`session.cooldownSeconds` is non-zero while a GoBiz login rate-limit is in ' +
+               'force — retrying during it only deepens the ban, so the dashboard disables its ' +
+               '"check now" button.',
             security: [{ ApiKeyAuth: [] }],
             parameters: [
                { name: 'days', in: 'query', schema: { type: 'integer', default: 14, minimum: 1, maximum: 90 }, description: 'Length of the daily series. Clamped to 1..90' },
@@ -294,9 +309,8 @@ export const openApiSpec = {
                                  conversionRate: 0.768,
                               },
                               daily: [{ day: '2026-07-10', created: 9, paid: 7, expired: 2, revenue: 350_000 }],
-                              recent: [{ trxId: 'ORDER-1042', status: 'PAID', payAmount: 52_637 }],
                               poll: { lastPollAt: '2026-07-10T12:29:58.000Z', staleSeconds: 4, minIntervalMs: 7000 },
-                              session: { ok: true, reauths: 2, lastError: null },
+                              session: { ok: true, reauths: 2, lastError: null, cooldownUntil: null, cooldownSeconds: 0 },
                               uniqueCode: { cursor: 37, max: 99 },
                            },
                         },
@@ -321,6 +335,62 @@ export const openApiSpec = {
             },
          },
       },
+      '/api/admin/reconcile': {
+         post: {
+            summary: 'Link an archived payment to an order by hand',
+            description: 'For money that arrived but never matched: a payer who typed the ' +
+               'amount themselves, or one who paid after the order expired. **This is the only ' +
+               'endpoint that will mark an EXPIRED order PAID** — the PENDING guard exists to ' +
+               'stop that happening automatically, and this is the deliberate exception.\n\n' +
+               'Fires `payment.paid`. If the consumer already received `payment.expired` for ' +
+               'this order it will now also receive `payment.paid`, so the handler must tolerate ' +
+               'that order of events. Idempotent: reconciling twice is a 409 and sends nothing.',
+            security: [{ ApiKeyAuth: [] }],
+            requestBody: {
+               required: true,
+               content: {
+                  'application/json': {
+                     schema: {
+                        type: 'object',
+                        required: ['gobizId', 'trxId'],
+                        properties: {
+                           gobizId: {
+                              type: 'string',
+                              example: 'GB-1042',
+                              description: 'From GET /history?matched=false',
+                           },
+                           trxId: { type: 'string', example: 'ORDER-1042' },
+                        },
+                     },
+                  },
+               },
+            },
+            responses: {
+               200: {
+                  description: 'Linked and marked PAID',
+                  content: {
+                     'application/json': {
+                        example: {
+                           success: true,
+                           data: {
+                              trxId: 'ORDER-1042',
+                              status: 'PAID',
+                              previousStatus: 'EXPIRED',
+                              expected: 52637,
+                              received: 52630,
+                              difference: -7,
+                           },
+                        },
+                     },
+                  },
+               },
+               400: { description: 'gobizId or trxId missing' },
+               401: { description: 'Missing/invalid API key' },
+               404: { description: 'Unknown gobizId or trxId' },
+               409: { description: 'Payment already linked, or order already PAID' },
+            },
+         },
+      },
       '/api/admin/webhooks/drain': {
          post: {
             summary: 'Retry every owed webhook now instead of on its backoff schedule',
@@ -333,9 +403,13 @@ export const openApiSpec = {
       },
       '/health': {
          get: {
-            summary: 'Health, counts, webhook backlog, and GoBiz session state',
+            summary: 'Liveness and GoBiz session state',
             description: 'Returns 503 when the upstream GoBiz session is down — payments ' +
-               'cannot be detected, so the instance is degraded. Point uptime monitors here.',
+               'cannot be detected, so the deployment is degraded. Point uptime monitors here; ' +
+               'no key needed.\n\n' +
+               'Transaction counts and `uniqueCodeCursor` are returned **only with the API key**. ' +
+               'Volume is business intelligence, and this endpoint is open.',
+            security: [{}, { ApiKeyAuth: [] }],
             responses: {
                200: {
                   description: 'Healthy',
@@ -348,6 +422,7 @@ export const openApiSpec = {
                               total: 128,
                               webhooksOwed: 0,
                               uniqueCodeCursor: 37,
+                              _note: 'the four fields above appear only with the API key',
                               session: {
                                  ok: true,
                                  lastCheckAt: '2026-07-10T12:30:00.000Z',
