@@ -8,21 +8,33 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      # Both ends of the range `engines.node` allows: 20 is the declared floor, 24
+      # is what development and the deployment actually run. Testing only one of
+      # them validates a version nobody uses.
+      matrix:
+        node: [20, 24]
+
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
 
-      # No services block: the suite runs against PGlite (Postgres compiled to
-      # WASM, in-process), so it needs no database container and no secrets.
+      # `npm ci` needs the committed lockfile — that is the point, it installs the
+      # exact versions production gets rather than re-resolving them.
       - run: npm ci
+
+      # Runs against PGlite (Postgres compiled to WASM, in-process), so there is no
+      # service container and no secrets to configure.
       - run: npm test
 
-      # The build is the other half of the contract — it is where Vue templates are
-      # compiled, so a broken component fails here rather than in production.
+      # The other half of the contract: this is where Vue templates are compiled, so
+      # a broken component fails here instead of in production.
       - run: npx nuxt build
         env:
           QRIS_STRING: '00020101021126001180002ID5802ID540520006304ABCD'

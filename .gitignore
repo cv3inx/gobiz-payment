@@ -25,9 +25,12 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
-package-lock.json
 
 # `vercel link` appends `.env*`, which would swallow the committed template too.
 .env*
 !.env.example
 .agents
+
+# package-lock.json is deliberately NOT ignored. This is an application, not a
+# library: the lockfile is what pins the exact dependency versions that reach
+# production, and both `npm ci` in CI and Vercel's build need it to be reproducible.
