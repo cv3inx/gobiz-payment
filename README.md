@@ -1,7 +1,7 @@
 # GoBiz Payment Gateway
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D20-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/Nuxt-4-00DC82?logo=nuxtdotjs&logoColor=white" alt="Nuxt 4" />
   <img src="https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white" alt="Express" />
   <img src="https://img.shields.io/badge/Postgres-any-4169E1?logo=postgresql&logoColor=white" alt="Postgres" />
@@ -52,7 +52,7 @@ Dibangun di atas library GoBiz dari [**kavionn/gobiz-payment**](https://github.c
 
 ## 📦 Instalasi
 
-Butuh **Node.js ≥ 20** dan sebuah **Postgres**.
+Butuh **Node.js ≥ 22** dan sebuah **Postgres**.
 
 ```bash
 git clone https://github.com/cv3inx/gobiz-payment.git

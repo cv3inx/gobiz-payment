@@ -11,11 +11,11 @@ jobs:
 
     strategy:
       fail-fast: false
-      # Both ends of the range `engines.node` allows: 20 is the declared floor, 24
-      # is what development and the deployment actually run. Testing only one of
-      # them validates a version nobody uses.
+      # Both ends of the range `engines.node` allows. The floor is 22, not 20:
+      # Nuxt's build uses Set.prototype.difference, which only exists from Node 22,
+      # so `nuxt build` dies on 20 even though the app itself runs there fine.
       matrix:
-        node: [20, 24]
+        node: [22, 24]
 
     steps:
       - uses: actions/checkout@v5

@@ -23,7 +23,7 @@
   "author": "kavionn (lib/gobiz.js), cv3inx (gateway layer)",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "crc": "^4.3.2",
