@@ -13,7 +13,7 @@ export function useTempEnv(env = {}) {
    if (process.env.TEST_DATABASE_URL) process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
    else delete process.env.DATABASE_URL;
 
-   process.env.QRIS_STRING ??= '00020101021126001180002ID5802ID540520006304ABCD';
+   process.env.QRIS_STRING ??= '00020101021126120008ID.GOPAY5204581253033605802ID5908TOKO ABC6007JAKARTA63048A30';
    process.env.WEBHOOK_SECRET ??= 'test-secret';
 
    delete process.env.VERCEL;

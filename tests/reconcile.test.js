@@ -60,7 +60,7 @@ const consumer = http.createServer((req, res) => {
 await new Promise((r) => consumer.listen(CONSUMER_PORT, '127.0.0.1', r));
 
 const archive = (gobizId, amount) =>
-   history.upsert({
+   history.claim({
       gobizId,
       amount,
       time: '01 Jan 2026 - 10:00:00',

@@ -123,11 +123,20 @@ function isPrivateIp(host) {
       if (a === 0) return true;
       return false;
    }
-   // IPv6 loopback / link-local / unique-local
-   const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+   // IPv6 literals only. The URL parser keeps them bracketed, so a hostname that
+   // merely starts with "fc" or "fd" (fdic.gov) is not one.
+   if (!host.startsWith('[')) return false;
+   const h = host.slice(1, -1).toLowerCase();
+   // IPv4-mapped or -compatible: [::ffff:127.0.0.1] reaches loopback. The parser
+   // rewrites it to [::ffff:7f00:1], so decode the hex back and check it as IPv4.
+   const v4 = h.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+   if (v4) {
+      const [hi, lo] = [parseInt(v4[1], 16), parseInt(v4[2], 16)];
+      return isPrivateIp(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+   }
    if (h === '::1' || h === '::') return true;
-   if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
-   return false;
+   // unique-local fc00::/7, link-local fe80::/10, site-local fec0::/10
+   return /^f[cd]/.test(h) || /^fe[89a-f]/.test(h);
 }
 
 /**
@@ -147,7 +156,8 @@ export function validateWebhookUrl(raw) {
    if (url.username || url.password) {
       return { ok: false, error: 'callbackUrl must not contain credentials' };
    }
-   const host = url.hostname.toLowerCase();
+   // A trailing dot ("localhost.") resolves the same as without one.
+   const host = url.hostname.toLowerCase().replace(/\.$/, '');
    if (BLOCKED_HOSTNAMES.has(host) || isPrivateIp(host)) {
       return { ok: false, error: 'callbackUrl points to a blocked/internal host' };
    }

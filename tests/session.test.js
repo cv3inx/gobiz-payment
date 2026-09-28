@@ -8,15 +8,18 @@ const { check, sessionHealth } = await import('../src/services/session.js');
 const { test, report } = createSuite('session');
 
 /** Stand-in for GoPayMerchant with just the surface the checker touches. */
-function fakeMerchant({ tokenValid = true, initFails = false } = {}) {
+function fakeMerchant({ tokenValid = true, initFails = false, token = 'tok', cachedTokenValid = false } = {}) {
    return {
-      token: 'tok',
+      token,
       _initialized: true,
       initCalls: 0,
+      logins: 0,
       _isTokenValid: async () => tokenValid,
       init: async function () {
          this.initCalls++;
          if (initFails) throw new Error('Login di-cooldown 900s');
+         // Like the real init(): a good cached token is loaded, not logged in for.
+         if (!cachedTokenValid) this.logins++;
          this._initialized = true;
       },
    };
@@ -36,6 +39,14 @@ test('an invalid token triggers re-authentication', async () => {
    assert.strictEqual(await check(m), true);
    assert.strictEqual(m.initCalls, 1, 'init() called to refresh');
    assert.ok((await sessionHealth()).reauths >= 1, 'reauth counted');
+});
+
+test('a cold instance loading its cached token is not counted as a re-auth', async () => {
+   // A new instance has no token in memory. init() only reads the cache, so no
+   // login happens and the counter must not move.
+   const reauths = (await sessionHealth()).reauths;
+   assert.strictEqual(await check(fakeMerchant({ token: null, cachedTokenValid: true })), true);
+   assert.strictEqual((await sessionHealth()).reauths, reauths);
 });
 
 test('a failed re-auth marks the session down and records why', async () => {

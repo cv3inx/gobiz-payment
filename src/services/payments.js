@@ -125,13 +125,16 @@ export async function expire(trx) {
    return true;
 }
 
-async function markPaid(trx, entry = null) {
+async function markPaid(trx, entry) {
    if (trx.status !== 'PENDING') return false;
    const paid = { ...trx, status: 'PAID', paidAt: new Date().toISOString(), entry };
    if (!(await transactions.settle(paid))) {
       logTrx.warn(`${trx.trxId} already settled, skipping PAID webhook`);
       return false;
    }
+   // Linked before the webhook goes out. Delivery can take seconds, and a payment
+   // that looks unmatched meanwhile could be reconciled by hand to a second order.
+   await history.linkIfUnmatched(entry.gobizId, trx.trxId);
    logTrx.ok(`PAID ${trx.trxId} amountToPay=${trx.payAmount}`);
    await webhooks.enqueue(paid);
    return true;
@@ -157,11 +160,6 @@ export async function expireDue() {
    return expired;
 }
 
-/**
- * Reconcile an incoming GoBiz payment against a pending order, then archive it.
- * Upstream sends gross_amount/100 (a float); payAmount is an integer column, so a
- * non-integral value could never match and the payment would go unreconciled.
- */
 /**
  * Attach an incoming payment to an order by hand.
  *
@@ -199,6 +197,9 @@ export async function reconcileManually({ gobizId, trxId }) {
    const paidAt = new Date().toISOString();
    const previousStatus = trx.status;
    if (!(await transactions.forcePaid({ trxId, paidAt, entry: entry.raw ?? entry }))) {
+      // The order was paid by something else. The payment is still unaccounted
+      // for, so release it for another reconcile.
+      await history.unlink(gobizId, trxId);
       fail('ALREADY_PAID', `${trxId} became PAID while reconciling`);
    }
 
@@ -216,24 +217,38 @@ export async function reconcileManually({ gobizId, trxId }) {
    return { trx: paid, previousStatus, received: entry.amount, difference };
 }
 
-export async function reconcile({ amount, txId, entry = null }) {
-   const rupiah = Math.round(amount);
-   const trx = Number.isFinite(rupiah) ? await transactions.getPendingByAmount(rupiah) : null;
+/**
+ * Archive an incoming GoBiz payment, and settle the pending order it pays for.
+ *
+ * The archive row is claimed first. Two overlapping cycles can both see the same
+ * entry as fresh, and only the one whose insert lands goes on, so one payment
+ * can never settle two orders.
+ *
+ * Only an order created before the payment can match. Unique codes are recycled,
+ * so a payment seen late (after its own order expired) would otherwise settle
+ * whichever newer order now holds the same amount. Such a payment stays unmatched
+ * for manual reconciliation, as does one with no usable payment time.
+ *
+ * Upstream sends gross_amount/100 (a float); payAmount is an integer column, so a
+ * non-integral value could never match and the payment would go unreconciled.
+ *
+ * @returns {Promise<object|null>} the order it settled
+ */
+export async function reconcile(entry) {
+   const amount = Math.round(entry.amount);
+   const claimed = await history.claim({
+      gobizId: entry.gobizId,
+      amount,
+      time: entry.time ?? null,
+      raw: entry,
+      seenAt: new Date().toISOString(),
+   });
+   if (!claimed) return null;
 
-   if (trx) await markPaid(trx, entry);
-   else logTrx.warn(`unmatched payment Rp ${amount} (gobizId=${txId}) — archived only`);
+   const trx = entry.paidAt ? await transactions.getPendingByAmount(amount, entry.paidAt) : null;
+   if (trx && (await markPaid(trx, entry))) return trx;
 
-   try {
-      await history.upsert({
-         gobizId: txId,
-         amount: rupiah,
-         time: entry?.time ?? null,
-         matchedTrxId: trx?.trxId ?? null,
-         raw: entry,
-         seenAt: new Date().toISOString(),
-      });
-   } catch (e) {
-      log('history').warn(`archive failed: ${e.message}`);
-   }
-   return trx;
+   const why = entry.paidAt ? '' : ', no payment time to match on';
+   logTrx.warn(`unmatched payment Rp ${entry.amount} (gobizId=${entry.gobizId})${why} — archived only`);
+   return null;
 }

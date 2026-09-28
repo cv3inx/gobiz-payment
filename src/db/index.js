@@ -40,6 +40,21 @@ export function withVerifiedSsl(raw) {
    }
 }
 
+/**
+ * TLS off only for a server on this machine. Judged on the parsed hostname: a
+ * test against the whole URL also matched a password or database name that
+ * happened to contain "localhost".
+ */
+export function sslOption(raw) {
+   let host = '';
+   try {
+      host = new URL(raw).hostname;
+   } catch {
+      // unparseable — verify, and let pg report the bad URL
+   }
+   return ['localhost', '127.0.0.1', '[::1]'].includes(host) ? false : { rejectUnauthorized: true };
+}
+
 async function connect() {
    if (process.env.DATABASE_URL) {
       const { default: pg } = await import('pg');
@@ -60,15 +75,14 @@ async function connect() {
          // good enough — without this, anything able to intercept the path could
          // present its own certificate.
          //
-         // Belt and braces with withVerifiedSsl() above: this option wins over the
-         // URL's `sslmode`, so verification holds even if that string changes.
+         // This covers a URL with no `sslmode`. When the URL has one, pg lets it
+         // override this option, which is why withVerifiedSsl() above rewrites it,
+         // and why `sslmode=disable` is the one explicit opt-out.
          //
          // Managed Postgres (Neon, Supabase) serves a publicly-trusted cert, so no
          // custom CA is needed. A self-hosted server with a private CA needs
          // `ca:` here instead of turning verification off.
-         ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL)
-            ? false
-            : { rejectUnauthorized: true },
+         ssl: sslOption(process.env.DATABASE_URL),
       });
       return pool;
    }

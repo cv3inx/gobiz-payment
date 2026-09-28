@@ -28,7 +28,12 @@ test('a tampered body fails verification', () => {
 });
 
 test('accepts public webhook URLs', () => {
-   for (const url of ['https://shop.example.com/hook', 'http://api.example.com:8080/cb', 'http://8.8.8.8/hook']) {
+   for (const url of [
+      'https://shop.example.com/hook', 'http://api.example.com:8080/cb', 'http://8.8.8.8/hook',
+      // Hostnames, not IPv6 addresses, however they start.
+      'https://fdic.gov/hook', 'https://fc2.com/hook', 'https://fe80.example.com/hook',
+      'http://[2001:4860:4860::8888]/hook', 'http://[::ffff:8.8.8.8]/hook',
+   ]) {
       assert.ok(validateWebhookUrl(url).ok, `${url} allowed`);
    }
 });
@@ -40,6 +45,9 @@ test('blocks internal hosts, bad schemes, and credentials (SSRF)', () => {
       'http://169.254.169.254/latest/meta-data/', 'http://metadata.google.internal/x',
       'http://10.0.0.5/x', 'http://172.16.3.4/x', 'http://192.168.1.1/x',
       'http://user:pass@example.com/x', 'not a url',
+      // IPv4-mapped IPv6 reaches the same hosts as the IPv4 literal.
+      'http://[::ffff:127.0.0.1]/x', 'http://[::ffff:7f00:1]/x', 'http://[::ffff:169.254.169.254]/x',
+      'http://[fd00::1]/x', 'http://[fe80::1]/x', 'http://localhost./x',
    ];
    for (const url of blocked) assert.ok(!validateWebhookUrl(url).ok, `${url} rejected`);
 });

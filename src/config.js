@@ -50,6 +50,10 @@ export const config = Object.freeze({
    // the only key we can match a payment back to an order with.
    uniqueCodeMax: int('UNIQUE_CODE_MAX', 99),
 
+   // The merchant's calendar, for "today" and per-day stats. Same variable the
+   // GoBiz client reads.
+   timeZone: str('TZ_NAME', 'Asia/Jakarta'),
+
    apiKey: str('API_KEY'),
    webhook: Object.freeze({
       url: str('WEBHOOK_URL'),

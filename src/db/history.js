@@ -2,24 +2,22 @@ import { all, one, sql, changed } from './index.js';
 import { clampPage } from './transactions.js';
 
 /**
- * Archive an incoming GoBiz transaction. matchedTrxId links it to one of our orders.
- * Idempotent: re-seeing a gobizId backfills the match instead of duplicating the row.
+ * Archive an incoming GoBiz transaction, unlinked. Returns false if this gobizId
+ * is already archived.
  *
  * This table doubles as the watcher's memory. Serverless has no in-process Set of
  * seen ids, so "have I already reconciled this payment?" is answered by the
- * gobizId primary key — see `seen()`.
+ * gobizId primary key — see `seen()`. The false return is what lets the
+ * reconciler claim a payment before it touches any order: of two overlapping
+ * cycles that both saw it as fresh, only the one whose insert landed goes on.
  */
-export async function upsert({ gobizId, amount, time = null, matchedTrxId = null, raw = null, seenAt }) {
-   await sql(
-      `INSERT INTO gobiz_history ("gobizId", amount, time, "matchedTrxId", raw, "seenAt")
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-       ON CONFLICT ("gobizId") DO UPDATE SET
-          "matchedTrxId" = COALESCE(excluded."matchedTrxId", gobiz_history."matchedTrxId")`,
-      [
-         String(gobizId), amount, time, matchedTrxId,
-         raw != null ? JSON.stringify(raw) : null, seenAt,
-      ],
-   );
+export async function claim({ gobizId, amount, time = null, raw = null, seenAt }) {
+   return await changed(
+      `INSERT INTO gobiz_history ("gobizId", amount, time, raw, "seenAt")
+       VALUES ($1, $2, $3, $4::jsonb, $5)
+       ON CONFLICT ("gobizId") DO NOTHING`,
+      [String(gobizId), amount, time, raw != null ? JSON.stringify(raw) : null, seenAt],
+   ) > 0;
 }
 
 /**
@@ -54,6 +52,15 @@ export async function linkIfUnmatched(gobizId, trxId) {
        WHERE "gobizId" = $1 AND "matchedTrxId" IS NULL`,
       [String(gobizId), trxId],
    ) > 0;
+}
+
+/** Undo `linkIfUnmatched`, but only the link to this trxId. */
+export async function unlink(gobizId, trxId) {
+   await sql(
+      `UPDATE gobiz_history SET "matchedTrxId" = NULL
+       WHERE "gobizId" = $1 AND "matchedTrxId" = $2`,
+      [String(gobizId), trxId],
+   );
 }
 
 /** matched: true = only linked, false = only unlinked, null = all. */

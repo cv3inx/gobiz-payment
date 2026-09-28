@@ -54,7 +54,9 @@ async function load() {
     unmatched.value = history
   } catch (e: any) {
     error.value = e.message
-    if (!apiKey.value) authed.value = false
+    // A 401 clears the key. Log out fully, or the refresh timer keeps retrying
+    // with no key every 20s.
+    if (!apiKey.value) logout()
   } finally {
     busy.value = false
   }
@@ -123,7 +125,7 @@ function logout() {
   stop()
 }
 
-/** Run an action, surface its outcome, then refresh. */
+/** Run an action, surface its outcome, then refresh. Resolves to whether it worked. */
 async function act(fn: () => Promise<any>, describe: (out: any) => string) {
   busy.value = true
   error.value = ''
@@ -131,8 +133,11 @@ async function act(fn: () => Promise<any>, describe: (out: any) => string) {
   try {
     notice.value = describe(await fn())
     await load()
+    return true
   } catch (e: any) {
     error.value = e.message
+    if (!apiKey.value) logout()
+    return false
   } finally {
     busy.value = false
   }
@@ -152,7 +157,7 @@ const drain = () =>
 
 const cancel = (t: any) =>
   act(() => api('POST', `/payment/${encodeURIComponent(t.trxId)}/cancel`), () => `${t.trxId} dibatalkan`)
-    .then(() => { selected.value = null })
+    .then((ok) => { if (ok) selected.value = null })
 
 const replay = (t: any) =>
   act(
@@ -180,7 +185,10 @@ const confirmReconcile = () => {
         : `selisih ${r.difference > 0 ? 'lebih' : 'kurang'} ${rp(Math.abs(r.difference))}`
       return `${r.trxId}: ${r.previousStatus} → ${r.status}, ${gap}. Webhook payment.paid dikirim.`
     },
-  ).then(() => { reconciling.value = null })
+  ).then((ok) => {
+    // Keep the dialog open on failure, so the error sits next to what was typed.
+    if (ok) reconciling.value = null
+  })
 }
 
 // Auto-refresh only while the tab is visible. A hidden tab polling forever burns
@@ -560,6 +568,7 @@ useHead({ title: 'Admin — GoBiz Payment' })
               dia akan menerima <code>payment.paid</code> sesudahnya — pastikan
               handler-mu tahan urutan itu. Tidak bisa dibatalkan.
             </div>
+            <div v-if="error" class="banner bad" style="margin: 14px 0 0">{{ error }}</div>
 
             <div class="row" style="margin-top: 14px">
               <button class="btn primary" :disabled="busy || !reconcileTrxId.trim()">

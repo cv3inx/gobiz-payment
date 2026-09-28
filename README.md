@@ -411,6 +411,13 @@ dari `amount + fee`. Selalu render QR + tampilkan `amountToPay`, jangan `amount`
 Maksimal `UNIQUE_CODE_MAX` transaksi pending boleh berbagi nominal dasar yang sama;
 lewat itu `/payment/create` balas `503`.
 
+**Waktu bayar ikut dicek.** Pembayaran cuma dicocokkan ke order `PENDING` yang
+dibuat **sebelum** waktu bayarnya. Kode unik didaur ulang, jadi tanpa cek ini
+transfer telat untuk order yang sudah kadaluarsa bisa melunasi order baru yang
+kebetulan dapat nominal sama. Transfer telat begitu masuk tabel **"belum
+kecocokan"** — tautkan manual dari dashboard. Ini juga alasan deploy baru tidak
+perlu pass seeding: history lama selalu lebih tua dari order mana pun.
+
 ---
 
 ## 🧩 Struktur
@@ -503,7 +510,7 @@ for (const tx of await merchant.getHistory({ days: 1, size: 30 })) {
 | Method | Fungsi |
 |--------|--------|
 | `init()` | Login / muat token dari DB, deteksi merchant ID |
-| `getHistory({ days, size })` | Pembayaran masuk, terbaru dulu |
+| `getHistory({ days, size, from })` | Pembayaran masuk, terbaru dulu (`from` = offset halaman) |
 | `tokenState(token)` | `'valid'` / `'invalid'` / `'unknown'` |
 | `invalidateToken()` | Buang token cache, paksa login ulang |
 

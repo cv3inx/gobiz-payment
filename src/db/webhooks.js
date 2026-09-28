@@ -17,8 +17,14 @@ const parse = (row) => ({
    uniqueCode: row.uniqueCode == null ? null : Number(row.uniqueCode),
 });
 
-/** Mark a transaction as owing a webhook. Resets the attempt counter. */
-export const owe = async (trxId, nextAt = new Date().toISOString()) => {
+/**
+ * Mark a transaction as owing a webhook. Resets the attempt counter.
+ *
+ * Leased by default, like `claim()`: the caller is about to deliver it inline,
+ * and a sweep running meanwhile must not send the same event a second time. If
+ * the inline attempt dies, the lease runs out and the sweep retries it.
+ */
+export const owe = async (trxId, nextAt = new Date(Date.now() + LEASE_MS).toISOString()) => {
    await sql(
       `UPDATE transactions
        SET "webhookState" = 'PENDING', "webhookAttempts" = 0,

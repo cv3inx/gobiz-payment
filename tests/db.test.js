@@ -30,6 +30,17 @@ test('the connection string is forced to verify-full', () => {
    assert.strictEqual(f('not a url'), 'not a url', 'unparseable input passes through');
 });
 
+test('TLS is skipped only when the host itself is local', () => {
+   const verified = { rejectUnauthorized: true };
+   assert.strictEqual(db.sslOption('postgres://u:p@localhost:5432/db'), false);
+   assert.strictEqual(db.sslOption('postgres://u:p@127.0.0.1/db'), false);
+   assert.strictEqual(db.sslOption('postgres://u:p@[::1]/db'), false);
+   // "localhost" elsewhere in the URL says nothing about where the server is.
+   assert.deepStrictEqual(db.sslOption('postgres://u:localhost@db.example.com/db'), verified);
+   assert.deepStrictEqual(db.sslOption('postgres://u:p@db.example.com/localhost_db'), verified);
+   assert.deepStrictEqual(db.sslOption('postgres://u:p@localhost.evil.com/db'), verified);
+});
+
 test('round-trips a transaction with JSON columns', async () => {
    const trx = makeTrx({ payAmount: 3001, uniqueCode: 1 });
    await transactions.insert(trx);
@@ -120,16 +131,38 @@ test('listExpired finds only overdue pending rows', async () => {
    assert.ok(!ids.includes(alive.trxId), 'still-valid row is not');
 });
 
-test('history upserts idempotently and backfills the match', async () => {
+test('history claims a payment exactly once', async () => {
+   // The reconciler's guard: a second cycle that saw the same payment as fresh
+   // must get false and leave the orders alone.
    const seenAt = new Date().toISOString();
-   await history.upsert({ gobizId: 'GB-1', amount: 52_500, matchedTrxId: 'order-9001', raw: { x: 1 }, seenAt });
-   await history.upsert({ gobizId: 'GB-2', amount: 3000, matchedTrxId: null, seenAt });
+   assert.strictEqual(await history.claim({ gobizId: 'GB-1', amount: 52_500, raw: { x: 1 }, seenAt }), true);
+   assert.strictEqual(await history.claim({ gobizId: 'GB-1', amount: 52_500, seenAt }), false, 'second claim loses');
+   assert.strictEqual(await history.claim({ gobizId: 'GB-2', amount: 3000, seenAt }), true);
+   assert.strictEqual((await history.list({ matched: false })).length, 2, 'claimed rows start unlinked');
+
+   assert.strictEqual(await history.linkIfUnmatched('GB-1', 'order-9001'), true);
+   assert.strictEqual(await history.linkIfUnmatched('GB-1', 'order-other'), false, 'no relinking');
    assert.deepStrictEqual((await history.list({ matched: true })).map((h) => h.gobizId), ['GB-1']);
    assert.deepStrictEqual((await history.list({ matched: false })).map((h) => h.gobizId), ['GB-2']);
    assert.deepStrictEqual((await history.list({ matched: true }))[0].raw, { x: 1 }, 'raw JSON round-trips');
 
-   await history.upsert({ gobizId: 'GB-2', amount: 3000, matchedTrxId: 'order-late', seenAt });
-   assert.strictEqual((await history.list({ matched: true })).length, 2, 'backfilled, no duplicate row');
+   await history.unlink('GB-1', 'order-other');
+   assert.strictEqual((await history.getById('GB-1')).matchedTrxId, 'order-9001', 'unlink needs the same trxId');
+   await history.unlink('GB-1', 'order-9001');
+   assert.strictEqual((await history.getById('GB-1')).matchedTrxId, null, 'released');
+   await history.linkIfUnmatched('GB-1', 'order-9001');
+});
+
+test('pending-by-amount ignores an order created after the payment', async () => {
+   // Unique codes are recycled. A payment seen late must not settle a newer
+   // order that has since taken the same amount.
+   const trx = makeTrx({ payAmount: 3300 });
+   await transactions.insert(trx);
+   const before = new Date(Date.parse(trx.createdAt) - 1000).toISOString();
+   const after = new Date(Date.parse(trx.createdAt) + 1000).toISOString();
+   assert.strictEqual(await transactions.getPendingByAmount(3300, before), null, 'paid before it existed');
+   assert.strictEqual((await transactions.getPendingByAmount(3300, after))?.trxId, trx.trxId);
+   assert.strictEqual((await transactions.getPendingByAmount(3300))?.trxId, trx.trxId, 'no time, no filter');
 });
 
 test('history.seen is the pollers durable memory', async () => {
@@ -146,7 +179,12 @@ test('webhook queue survives a backoff window', async () => {
 
    assert.strictEqual((await webhooks.due()).find((t) => t.trxId === 'wh-1'), undefined, 'nothing owed yet');
    await webhooks.owe('wh-1');
-   assert.ok((await webhooks.due()).some((t) => t.trxId === 'wh-1'), 'owed webhook is due');
+   // Leased for the inline attempt the caller makes next, so a concurrent sweep
+   // cannot send it too.
+   assert.ok(!(await webhooks.due()).some((t) => t.trxId === 'wh-1'), 'not due while the inline attempt runs');
+   const afterLease = new Date(Date.now() + 61_000).toISOString();
+   assert.ok((await webhooks.due({ now: afterLease })).some((t) => t.trxId === 'wh-1'),
+      'due once the lease runs out, so a crashed inline attempt is retried');
 
    const later = new Date(Date.now() + 60_000).toISOString();
    await webhooks.markFailed('wh-1', 'ECONNREFUSED', later);
@@ -170,7 +208,7 @@ test('claim leases a webhook so an overlapping run cannot double-send it', async
    const trx = makeTrx({ payAmount: 12_500, trxId: 'wh-lease' });
    await transactions.insert(trx);
    await transactions.settle({ ...trx, status: 'PAID', paidAt: 'now' });
-   await webhooks.owe('wh-lease');
+   await webhooks.owe('wh-lease', new Date().toISOString()); // due now, as after a failed attempt
 
    const first = await webhooks.claim({ limit: 50 });
    assert.ok(first.some((t) => t.trxId === 'wh-lease'), 'first worker gets it');

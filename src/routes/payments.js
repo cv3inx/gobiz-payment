@@ -23,14 +23,20 @@ const wrap = (handler) => (req, res, next) => Promise.resolve(handler(req, res, 
 /** PUBLIC_URL wins, else derive from the request (honors X-Forwarded-* via trust proxy). */
 const baseUrlFor = (req) => config.publicUrl || `${req.protocol}://${req.get('host')}`;
 
+/**
+ * Strict integer read. parseInt takes "1e6" as 1 and "12abc" as 12, which would
+ * create an order for a different amount than the caller sent.
+ */
+const toInt = (v) => (typeof v === 'number' ? v : /^\s*-?\d+\s*$/.test(String(v)) ? Number(v) : NaN);
+
 /** Validate the create-payment body. Returns { error } or { value }. */
 function parseCreateBody(body = {}, headers) {
-   const amount = parseInt(body.amount, 10);
+   const amount = toInt(body.amount);
    if (!Number.isInteger(amount) || amount <= 0 || amount > config.maxAmount) {
       return { error: `amount must be an integer between 1 and ${config.maxAmount}` };
    }
 
-   const fee = body.fee == null ? 0 : parseInt(body.fee, 10);
+   const fee = body.fee == null ? 0 : toInt(body.fee);
    if (!Number.isInteger(fee) || fee < 0 || fee > config.maxAmount) {
       return { error: `fee must be an integer between 0 and ${config.maxAmount}` };
    }
@@ -39,7 +45,7 @@ function parseCreateBody(body = {}, headers) {
    // payable amounts reserved indefinitely.
    const expireMinutes = body.expireMinutes == null
       ? config.expireMinutes
-      : parseInt(body.expireMinutes, 10);
+      : toInt(body.expireMinutes);
    if (!Number.isInteger(expireMinutes) || expireMinutes <= 0 || expireMinutes > config.maxExpireMinutes) {
       return { error: `expireMinutes must be an integer between 1 and ${config.maxExpireMinutes}` };
    }
@@ -90,11 +96,9 @@ export function paymentRoutes(guard, merchant = null) {
       const { error, value } = parseCreateBody(req.body, req.headers);
       if (error) return fail(res, 400, error);
 
-      if (value.trxId && await transactions.get(value.trxId)) {
-         return fail(res, 409, 'trxId already exists');
-      }
-
       // Idempotency: the same key returns the original instead of double-charging.
+      // Checked before the trxId, because a retry that also sends its own trxId
+      // would otherwise get a 409 for the order it already created.
       if (value.idempotencyKey) {
          const existing = await transactions.getByIdempotencyKey(value.idempotencyKey);
          if (existing) {
@@ -104,6 +108,10 @@ export function paymentRoutes(guard, merchant = null) {
                data: payments.toPublic(existing, baseUrlFor(req)),
             });
          }
+      }
+
+      if (value.trxId && await transactions.get(value.trxId)) {
+         return fail(res, 409, 'trxId already exists');
       }
 
       try {
@@ -153,7 +161,11 @@ export function paymentRoutes(guard, merchant = null) {
       // There is no cron: this request IS the scheduler.
       // ponytail: awaited, so it adds the upstream round trip to this response.
       // Move it behind `waitUntil` from @vercel/functions if that latency matters.
-      if (merchant && found.status === 'PENDING' && !payments.isOverdue(found)) {
+      //
+      // An overdue order polls too, before it is expired below. Its payment may
+      // already be upstream, and once the order is EXPIRED only an operator can
+      // match it.
+      if (merchant && found.status === 'PENDING') {
          await cycleIfStale(merchant, config.pollMinIntervalMs);
          found = (await transactions.get(req.params.trxId)) || found;
       }

@@ -6,7 +6,12 @@ import * as webhooks from './webhooks.js';
 import { check as checkSession } from './session.js';
 
 const logger = log('poller');
-const SEEDED_KEY = 'poller.seeded';
+
+const PAGE_SIZE = 50;
+// ponytail: at most 4 pages (200 payments) per pass. A backlog deeper than that
+// between two passes is missed until manual reconciliation. Raise the cap, or
+// widen `days`, if a merchant's volume ever gets there.
+const MAX_PAGES = 4;
 
 /**
  * One pass over GoBiz history.
@@ -17,41 +22,30 @@ const SEEDED_KEY = 'poller.seeded';
  * is running is still unseen on the next pass, so it gets reconciled instead of
  * being silently swallowed at the next cold start.
  *
- * Two overlapping passes reconciling the same entry is harmless: `settle()` is
- * guarded on status = 'PENDING', so only one wins and only one webhook fires.
+ * Pages until it reaches an already-archived payment. With no traffic nothing
+ * polls, and walk-in payments to the same merchant keep arriving meanwhile, so
+ * one page can end before the payment an order is waiting on.
+ *
+ * No seeding pass is needed on a fresh deployment. `reconcile` never matches a
+ * payment to an order created after it, so the pre-deployment history the first
+ * pass reads is only archived.
  */
 async function pollOnce(merchant) {
-   const entries = (await merchant.getHistory({ days: 1, size: 30 }))
-      .filter((e) => Number.isFinite(e.amount));
-
-   const known = await history.seen(entries.map((e) => e.gobizId));
-   const fresh = entries.filter((e) => !known.has(e.gobizId));
-   const seenAt = new Date().toISOString();
-
-   // First pass on a new deployment: archive the existing history as "already
-   // known" rather than reconciling a day of past payments against fresh orders.
-   //
-   // Checked before the empty-batch shortcut on purpose. If the first pass sees no
-   // history at all (a quiet day, a brand-new merchant) the flag must still be set
-   // — otherwise the seed is deferred and the first REAL payment gets archived as
-   // "pre-existing" and never reconciled.
-   if (!(await meta.get(SEEDED_KEY))) {
-      for (const e of fresh) {
-         await history.upsert({ gobizId: e.gobizId, amount: Math.round(e.amount), time: e.time, raw: e.raw, seenAt });
-      }
-      await meta.set(SEEDED_KEY, true);
-      logger.info(`Seed selesai. ${fresh.length} transaksi lama ditandai "sudah dikenal".`);
-      return { fresh: fresh.length, matched: 0, seeded: true };
+   const fresh = [];
+   for (let page = 0; page < MAX_PAGES; page++) {
+      const batch = await merchant.getHistory({ days: 1, size: PAGE_SIZE, from: page * PAGE_SIZE });
+      const known = await history.seen(batch.map((e) => e.gobizId));
+      fresh.push(...batch.filter((e) => Number.isFinite(e.amount) && !known.has(e.gobizId)));
+      // Newest first, so a known id means an earlier pass read everything older.
+      if (batch.length < PAGE_SIZE || known.size) break;
    }
-
-   if (!fresh.length) return { fresh: 0, matched: 0, seeded: false };
 
    let matched = 0;
    for (const e of fresh) {
       logger.ok(`Transaksi baru: Rp ${e.amount.toLocaleString('id-ID')} | ID: ${e.gobizId}`);
-      if (await payments.reconcile({ amount: e.amount, txId: e.gobizId, entry: e })) matched++;
+      if (await payments.reconcile(e)) matched++;
    }
-   return { fresh: fresh.length, matched, seeded: false };
+   return { fresh: fresh.length, matched };
 }
 
 /**
@@ -76,7 +70,9 @@ async function pollOnce(merchant) {
 export async function cycleIfStale(merchant, minIntervalMs) {
    if (!(await meta.tryClaimPollSlot(minIntervalMs))) return null;
    try {
-      return await runCycle(merchant, { session: false });
+      // A payer is waiting on this response, so only a small webhook batch rides
+      // along. The rest wait for the next cycle.
+      return await runCycle(merchant, { session: false, webhookLimit: 5 });
    } catch (e) {
       logger.error(`opportunistic cycle gagal: ${e.message}`);
       return null;
@@ -93,8 +89,9 @@ export async function cycleIfStale(merchant, minIntervalMs) {
  * @param {boolean} [opts.session] - probe the GoBiz session too. Skipped on the
  *   traffic-driven path, where it would add a second upstream round trip to a
  *   request a payer is waiting on; `getHistory` re-authenticates on its own anyway.
+ * @param {number} [opts.webhookLimit] - most owed webhooks to deliver this cycle.
  */
-export async function runCycle(merchant, { session = true } = {}) {
+export async function runCycle(merchant, { session = true, webhookLimit = 20 } = {}) {
    const result = { session: null, poll: null, expired: 0, webhooks: 0, errors: [] };
 
    const step = async (name, fn) => {
@@ -115,7 +112,7 @@ export async function runCycle(merchant, { session = true } = {}) {
       return pollOnce(merchant);
    });
    result.expired = (await step('expire', () => payments.expireDue())) ?? 0;
-   result.webhooks = (await step('webhooks', () => webhooks.drain())) ?? 0;
+   result.webhooks = (await step('webhooks', () => webhooks.drain({ limit: webhookLimit }))) ?? 0;
 
    return result;
 }

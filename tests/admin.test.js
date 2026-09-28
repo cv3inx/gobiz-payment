@@ -39,15 +39,12 @@ const call = async (method, path, { headers = AUTH, body } = {}) => {
 };
 
 const payin = (gobizId, amount) => ({
-   gobizId, amount, time: '01 Jan 2026 - 10:00:00',
+   gobizId, amount, time: '01 Jan 2026 - 10:00:00', paidAt: new Date().toISOString(),
    raw: { transaction_id: gobizId, gross_amount: amount * 100, status: 'SETTLEMENT' },
 });
 
 const { test, report } = createSuite('admin');
 const results = {};
-
-// Seed pass first, so later polls are live rather than seeding.
-await call('POST', '/api/admin/poll');
 
 results.statsNoKey = await call('GET', '/api/admin/stats', { headers: {} });
 results.pollNoKey = await call('POST', '/api/admin/poll', { headers: {} });

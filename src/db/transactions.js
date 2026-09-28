@@ -50,10 +50,16 @@ export async function insert(trx) {
 export const get = async (trxId) =>
    parse(await one(`SELECT * FROM transactions WHERE "trxId" = $1`, [trxId]));
 
-export const getPendingByAmount = async (payAmount) =>
+/**
+ * The PENDING order awaiting this exact amount. Given `paidAt`, only an order
+ * created before that moment counts: money sent before an order existed is not
+ * for it, whatever the amount.
+ */
+export const getPendingByAmount = async (payAmount, paidAt = null) =>
    parse(await one(
-      `SELECT * FROM transactions WHERE "payAmount" = $1 AND status = 'PENDING'`,
-      [payAmount],
+      `SELECT * FROM transactions WHERE "payAmount" = $1 AND status = 'PENDING'
+         AND ($2::text IS NULL OR "createdAt" <= $2)`,
+      [payAmount, paidAt],
    ));
 
 export const getByIdempotencyKey = async (key) =>

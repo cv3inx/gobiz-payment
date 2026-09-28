@@ -38,6 +38,9 @@ async function post(url, trx) {
             'X-Signature': signBody(body, secret),
          },
          body,
+         // The URL was checked against internal hosts, but a redirect target is
+         // not. Following one would let a public URL bounce the request inward.
+         redirect: 'manual',
          // Without a timeout a black-holed consumer hangs until the function's
          // own wall-clock limit kills it, taking the whole sweep down with it.
          signal: AbortSignal.timeout(config.webhook.timeoutMs),
@@ -90,7 +93,9 @@ export async function deliver(trx) {
 export async function enqueue(trx) {
    await store.owe(trx.trxId);
    try {
-      await deliver(trx);
+      // owe() reset the counter. The caller's row may still carry attempts from
+      // an earlier event, which would make this one give up early.
+      await deliver({ ...trx, webhookAttempts: 0 });
    } catch (e) {
       logger.error(`${trx.trxId} delivery crashed: ${e.message}`);
    }

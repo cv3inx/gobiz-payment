@@ -40,14 +40,16 @@ export async function check(merchant) {
    try {
       const valid = merchant.token && await merchant._isTokenValid(merchant.token);
 
-      let reauths = previous.reauths;
+      // Counted from actual logins, not from calls to init(). A cold instance has
+      // no token in memory yet, and init() usually just loads the cached one.
+      const loginsBefore = merchant.logins ?? 0;
       if (!valid) {
          logger.warn('token invalid — re-authenticating');
          merchant._initialized = false;
          await merchant.init();
-         reauths++;
          logger.ok('session re-authenticated');
       }
+      const reauths = previous.reauths + (merchant.logins ?? 0) - loginsBefore;
 
       await meta.set(KEY, {
          ok: true,

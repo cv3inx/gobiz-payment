@@ -42,6 +42,15 @@ test('a settled payin is parsed, with the amount converted from cents', () => {
    assert.strictEqual(entry.raw.gross_amount, 501_800, 'raw payload kept for the archive');
 });
 
+test('the payment time is kept as an instant for matching', () => {
+   // The reconciler compares it against an order's createdAt, so it must be UTC
+   // ISO, not the display string.
+   assert.strictEqual(merchant._normalize([analyticsRow()])[0].paidAt, '2026-08-25T21:53:12.000Z');
+   const [garbage] = merchant._normalize([analyticsRow({ transaction_time: 'kemarin sore' })]);
+   assert.strictEqual(garbage.paidAt, null, 'unparseable time is null, not Invalid Date');
+   assert.strictEqual(garbage.time, null);
+});
+
 test('the status filter reads transaction_status, not status', () => {
    // The exact regression. `status` is absent from this payload, so a filter
    // reading it drops every payment and the gateway silently stops working.

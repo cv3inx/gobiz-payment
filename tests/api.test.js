@@ -9,6 +9,7 @@ useTempEnv({
    API_KEY: 'test-key',
    WEBHOOK_URL: DEAD_CONSUMER,
    UNIQUE_CODE_MAX: '99',
+   RATE_MAX: '1000', // the suite makes more calls than one client may per window
 });
 
 const db = await setupDatabase();
@@ -26,13 +27,13 @@ const merchant = {
    _initialized: true,
    _isTokenValid: async () => true,
    init: async () => {},
-   getHistory: async () => {
+   getHistory: async ({ size = 50, from = 0 } = {}) => {
       if (upstream.failNext) {
          const why = upstream.failNext;
          upstream.failNext = null;
          throw new Error(why);
       }
-      return upstream.history;
+      return upstream.history.slice(from, from + size);
    },
 };
 
@@ -61,12 +62,15 @@ const create = (body) => call('POST', '/payment/create', { body });
 const runCycle = () => call('POST', '/api/admin/poll');
 
 /** One upstream payin entry, shaped like lib/gobiz.js `getHistory` output. */
-const payin = (gobizId, amount) => ({
+const payin = (gobizId, amount, paidAt = new Date().toISOString()) => ({
    gobizId,
    amount,
    time: '01 Jan 2026 - 10:00:00',
+   paidAt,
    raw: { transaction_id: gobizId, gross_amount: amount * 100, status: 'SETTLEMENT' },
 });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const { test, report } = createSuite('api');
 const results = {};
@@ -87,19 +91,29 @@ results.badTrxId = await create({ amount: 100, trxId: 'bad id!' });
 results.badStatus = await call('GET', '/payments?status=BOGUS');
 
 results.cycleNoAuth = await call('POST', '/api/admin/poll', { headers: {} });
-
-// The first cycle seeds: pre-existing upstream history must NOT be reconciled
-// against orders created later.
-upstream.history = [payin('GB-OLD-1', 5101), payin('GB-OLD-2', 7777)];
-results.cycleSeed = await runCycle();
+// parseInt read these as 1 and 12, creating an order for an amount nobody sent.
+results.expAmount = await create({ amount: '1e6' });
+results.junkAmount = await create({ amount: '12abc' });
+results.fracAmount = await create({ amount: 1.5 });
 
 results.created = await create({ amount: 5000, fee: 100, metadata: { orderId: 1 } });
 const trxId = results.created.body.data?.trxId;
 const createdAmount = results.created.body.data?.amountToPay;
 
+// Payments made before the order existed, one at its exact amount: the history
+// a fresh deployment reads, or a recycled code's previous owner being paid.
+const anHourAgo = new Date(Date.now() - 3_600_000).toISOString();
+upstream.history = [payin('GB-OLD-1', createdAmount, anHourAgo), payin('GB-OLD-2', 7777, anHourAgo)];
+results.cycleOld = await runCycle();
+results.afterOld = await call('GET', `/payment/${trxId}`);
+
 results.duplicate = await create({ amount: 100, trxId });
 results.idem1 = await create({ amount: 7000, idempotencyKey: 'idem-1' });
 results.idem2 = await create({ amount: 7000, idempotencyKey: 'idem-1' });
+// A client retrying a create that carries its own trxId must get the original
+// back, not a 409 for the id its first attempt just used.
+results.idemTrx1 = await create({ amount: 7100, trxId: 'order-idem-trx', idempotencyKey: 'idem-trx' });
+results.idemTrx2 = await create({ amount: 7100, trxId: 'order-idem-trx', idempotencyKey: 'idem-trx' });
 
 results.sequential = [];
 for (let i = 0; i < 3; i++) results.sequential.push((await create({ amount: 33_000 })).body.data.uniqueCode);
@@ -127,6 +141,35 @@ results.cycleReplay = await runCycle();
 upstream.history = [payin('GB-ORPHAN', 999_777), ...upstream.history];
 results.cycleOrphan = await runCycle();
 results.historyUnmatched = await call('GET', '/history?matched=false');
+
+// A late payment for a cancelled order whose amount has since gone to a new
+// order. The payment predates the new order, so it must not settle it.
+const lateX = (await create({ amount: 6100 })).body.data;
+await sleep(5);
+const paidInWindow = new Date().toISOString();
+await sleep(5);
+await call('POST', `/payment/${lateX.trxId}/cancel`);
+const lateY = (await create({ amount: 6100 })).body.data;
+await db.sql(`UPDATE transactions SET "payAmount" = $1 WHERE "trxId" = $2`, [lateX.amountToPay, lateY.trxId]);
+upstream.history = [payin('GB-LATE', lateX.amountToPay, paidInWindow), ...upstream.history];
+results.cycleLate = await runCycle();
+results.afterLate = await call('GET', `/payment/${lateY.trxId}`);
+results.historyLate = await call('GET', '/history?matched=false');
+
+// Two overlapping cycles both see the same payment as fresh.
+const dup = (await create({ amount: 6200 })).body.data;
+upstream.history = [payin('GB-DUP', dup.amountToPay), ...upstream.history];
+results.cycleDup = await Promise.all([runCycle(), runCycle()]);
+results.afterDup = await call('GET', `/payment/${dup.trxId}`);
+
+// More walk-in payments than one page landed while nothing polled. The one an
+// order is waiting on is on page two. Kept after every /history read above:
+// these 50 would push the earlier entries off its first page.
+const deep = (await create({ amount: 6300 })).body.data;
+const burst = Array.from({ length: 50 }, (_, i) => payin(`GB-BURST-${i}`, 900_000 + i));
+upstream.history = [...burst, payin('GB-DEEP', deep.amountToPay), ...upstream.history];
+results.cycleDeep = await runCycle();
+results.afterDeep = await call('GET', `/payment/${deep.trxId}`);
 
 // A pending transaction whose expiry has passed while nothing was running: the
 // cycle sweep settles it, and a status read settles it on the spot.
@@ -241,12 +284,16 @@ test('input validation rejects bad amounts, fees, expiries, and URLs', () => {
    assert.strictEqual(results.ssrf.status, 400, 'SSRF callbackUrl');
    assert.strictEqual(results.badTrxId.status, 400, 'malformed trxId');
    assert.strictEqual(results.badStatus.status, 400, 'unknown status filter');
+   assert.strictEqual(results.expAmount.status, 400, 'amount "1e6"');
+   assert.strictEqual(results.junkAmount.status, 400, 'amount "12abc"');
+   assert.strictEqual(results.fracAmount.status, 400, 'amount 1.5');
 });
 
-test('the first cycle seeds history instead of reconciling it', () => {
-   assert.strictEqual(results.cycleSeed.status, 200);
-   assert.strictEqual(results.cycleSeed.body.data.poll.seeded, true);
-   assert.strictEqual(results.cycleSeed.body.data.poll.matched, 0, 'nothing matched on a seed pass');
+test('a payment made before the order existed is archived, not matched', () => {
+   assert.strictEqual(results.cycleOld.status, 200);
+   assert.strictEqual(results.cycleOld.body.data.poll.fresh, 2);
+   assert.strictEqual(results.cycleOld.body.data.poll.matched, 0, 'same amount, but paid an hour earlier');
+   assert.strictEqual(results.afterOld.body.data.status, 'PENDING');
 });
 
 test('create returns a payable amount built from amount + fee + code', () => {
@@ -274,6 +321,9 @@ test('idempotency key returns the original transaction', () => {
    assert.strictEqual(results.idem2.status, 200);
    assert.strictEqual(results.idem2.body.idempotent, true);
    assert.strictEqual(results.idem2.body.data.trxId, results.idem1.body.data.trxId);
+   assert.strictEqual(results.idemTrx1.status, 201);
+   assert.strictEqual(results.idemTrx2.status, 200, 'retry with its own trxId is not a 409');
+   assert.strictEqual(results.idemTrx2.body.idempotent, true);
 });
 
 test('status, QR image, and health all respond', () => {
@@ -342,6 +392,25 @@ test('an unmatched payment is archived rather than dropped', () => {
       results.historyUnmatched.body.data.some((h) => h.gobizId === 'GB-ORPHAN'),
       'visible via ?matched=false for manual reconciliation',
    );
+});
+
+test('a late payment does not settle the newer order that took its amount', () => {
+   assert.strictEqual(results.cycleLate.body.data.poll.fresh, 1);
+   assert.strictEqual(results.cycleLate.body.data.poll.matched, 0);
+   assert.strictEqual(results.afterLate.body.data.status, 'PENDING', 'the new order is untouched');
+   assert.ok(results.historyLate.body.data.some((h) => h.gobizId === 'GB-LATE'), 'left for manual reconciliation');
+});
+
+test('overlapping cycles settle one payment once', () => {
+   const matched = results.cycleDup.reduce((n, r) => n + r.body.data.poll.matched, 0);
+   assert.strictEqual(matched, 1);
+   assert.strictEqual(results.afterDup.body.data.status, 'PAID');
+});
+
+test('the poller pages past a burst to reach the payment an order waits on', () => {
+   assert.strictEqual(results.cycleDeep.body.data.poll.fresh, 51);
+   assert.strictEqual(results.cycleDeep.body.data.poll.matched, 1);
+   assert.strictEqual(results.afterDeep.body.data.status, 'PAID');
 });
 
 test('an overdue transaction is settled on read', () => {

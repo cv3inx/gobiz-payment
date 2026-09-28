@@ -1,15 +1,20 @@
+import { config } from '../config.js';
 import { all, one } from './index.js';
 
 /**
  * Aggregates for the admin dashboard.
  *
- * `createdAt` / `paidAt` are ISO-8601 UTC strings, so `substr(...,1,10)` is the
- * calendar day and lexical comparison is chronological — no timestamp casting
- * needed to slice by date.
+ * `createdAt` / `paidAt` are ISO-8601 UTC strings. Days are counted in the
+ * merchant's time zone, not UTC: in Jakarta the UTC date is still yesterday
+ * until 07:00, which would book a morning's revenue on the wrong day.
  */
 
 const day = (offsetDays) =>
-   new Date(Date.now() - offsetDays * 86_400_000).toISOString().slice(0, 10);
+   new Date(Date.now() - offsetDays * 86_400_000)
+      .toLocaleDateString('en-CA', { timeZone: config.timeZone }); // en-CA is YYYY-MM-DD
+
+/** SQL for a column's calendar day in the merchant's zone. The zone is always $1. */
+const localDay = (col) => `to_char((${col})::timestamptz AT TIME ZONE $1, 'YYYY-MM-DD')`;
 
 /** Headline totals: counts per status plus paid volume over rolling windows. */
 export async function summary() {
@@ -21,16 +26,16 @@ export async function summary() {
          COUNT(*) FILTER (WHERE status = 'EXPIRED')                    AS expired,
          COUNT(*) FILTER (WHERE "webhookState" = 'PENDING')            AS "webhooksOwed",
          COUNT(*) FILTER (WHERE "webhookState" = 'PENDING'
-                            AND "webhookAttempts" >= $1)               AS "webhooksStuck",
+                            AND "webhookAttempts" >= $2)               AS "webhooksStuck",
          COALESCE(SUM(amount + fee) FILTER (WHERE status = 'PAID'), 0)  AS "revenueAll",
          COALESCE(SUM(amount + fee) FILTER (
-            WHERE status = 'PAID' AND substr("paidAt", 1, 10) = $2), 0) AS "revenueToday",
+            WHERE status = 'PAID' AND ${localDay('"paidAt"')} = $3), 0)  AS "revenueToday",
          COALESCE(SUM(amount + fee) FILTER (
-            WHERE status = 'PAID' AND substr("paidAt", 1, 10) >= $3), 0) AS "revenue7d",
+            WHERE status = 'PAID' AND ${localDay('"paidAt"')} >= $4), 0) AS "revenue7d",
          COALESCE(SUM(amount + fee) FILTER (
-            WHERE status = 'PAID' AND substr("paidAt", 1, 10) >= $4), 0) AS "revenue30d"
+            WHERE status = 'PAID' AND ${localDay('"paidAt"')} >= $5), 0) AS "revenue30d"
       FROM transactions
-   `, [12, day(0), day(6), day(29)]);
+   `, [config.timeZone, config.webhook.maxAttempts, day(0), day(6), day(29)]);
 
    const orphans = await one(`
       SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS value
@@ -61,15 +66,15 @@ export async function summary() {
 export async function daily(days = 14) {
    const from = day(days - 1);
    const rows = await all(`
-      SELECT substr("createdAt", 1, 10)                          AS day,
+      SELECT ${localDay('"createdAt"')}                          AS day,
              COUNT(*)                                            AS created,
              COUNT(*) FILTER (WHERE status = 'PAID')             AS paid,
              COUNT(*) FILTER (WHERE status = 'EXPIRED')          AS expired,
              COALESCE(SUM(amount + fee) FILTER (WHERE status = 'PAID'), 0) AS revenue
       FROM transactions
-      WHERE substr("createdAt", 1, 10) >= $1
+      WHERE ${localDay('"createdAt"')} >= $2
       GROUP BY 1 ORDER BY 1
-   `, [from]);
+   `, [config.timeZone, from]);
 
    const byDay = new Map(rows.map((r) => [r.day, r]));
    return Array.from({ length: days }, (_, i) => {
