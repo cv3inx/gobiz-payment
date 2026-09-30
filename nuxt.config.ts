@@ -8,6 +8,18 @@
  * function entry ("The default export must be a function or server"). With Nuxt
  * there is exactly one entry, so that failure mode is gone.
  */
+import { createRequire } from 'node:module'
+import { dirname } from 'node:path'
+
+// Swagger UI's stylesheet and bundle, served as static files.
+//
+// They used to come from `swagger-ui-express`, whose middleware points
+// `express.static` at this same directory. That cannot work inside the Nitro
+// build: the bundler traces only the JS it sees required, so `.output` received
+// `absolute-path.js` and nothing else, and every asset request fell through to
+// the HTML handler — the docs page loaded, then rendered blank.
+const swaggerUiDir = dirname(createRequire(import.meta.url).resolve('swagger-ui-dist/package.json'))
+
 export default defineNuxtConfig({
    srcDir: 'web',
 
@@ -37,10 +49,14 @@ export default defineNuxtConfig({
       // it out of the bundle stops the build from inlining a WASM Postgres that
       // production never touches.
       externals: { external: ['@electric-sql/pglite'] },
+
+      // Copied into `.output/public` at build time, so the deployment carries its
+      // own docs assets and needs no CDN. Versioned by the lockfile.
+      publicAssets: [{ dir: swaggerUiDir, baseURL: '/docs-assets', maxAge: 31_536_000 }],
    },
 
-   // `swagger-ui-express` and `express` are CommonJS and must stay external —
-   // bundling them breaks their internal `require` of static assets.
+   // `express` is CommonJS and must stay external — bundling it breaks its
+   // internal `require`.
    vite: {
       build: { target: 'esnext' },
    },

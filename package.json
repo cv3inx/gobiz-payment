@@ -1,7 +1,7 @@
 {
   "name": "gobiz-payment",
   "version": "1.0.0",
-  "description": "Self-hosted QRIS payment gateway di atas GoBiz (GoPay Merchant) \u2014 QRIS dinamis, matching pembayaran otomatis, webhook bertanda tangan.",
+  "description": "Self-hosted QRIS payment gateway di atas GoBiz (GoPay Merchant) — QRIS dinamis, matching pembayaran otomatis, webhook bertanda tangan.",
   "private": true,
   "type": "module",
   "scripts": {
@@ -34,7 +34,7 @@
     "nuxt": "^4.5.2",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
-    "swagger-ui-express": "^5.0.1",
+    "swagger-ui-dist": "^5.32.14",
     "vue": "^3.5.41",
     "vue-router": "^5.2.0"
   },

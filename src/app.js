@@ -28,10 +28,7 @@ function requestLogger() {
       useColor ? fg(35, tokens.method(req, res).padEnd(4)) : tokens.method(req, res).padEnd(4),
       dim('-'),
       dim(`${tokens['response-time'](req, res) || '0'}ms`),
-   ].join(' '), {
-      // Swagger's own static assets are pure noise; keep the real API calls visible.
-      skip: (req) => /^\/docs\/.+\.(js|css|png|ico|map)$/.test(req.originalUrl),
-   });
+   ].join(' '));
 }
 
 /**
@@ -48,12 +45,10 @@ export function createApp({ merchant = null } = {}) {
 
    app.use(requestLogger());
 
-   // Ahead of the docs, so serving the Swagger bundle can't be used to hammer the
-   // deployment for free.
    app.use(rateLimit({ max: config.rateMax }));
 
-   // Docs stay ahead of securityHeaders: Swagger UI's inline assets do not survive
-   // the API's `default-src 'none'` policy.
+   // Docs stay ahead of securityHeaders: the Swagger UI page sets its own, looser
+   // CSP, which the API's `default-src 'none'` would otherwise overwrite.
    app.use(systemRoutes());
 
    app.use(securityHeaders);
