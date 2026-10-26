@@ -45,7 +45,7 @@ export function createApp({ merchant = null } = {}) {
 
    app.use(requestLogger());
 
-   app.use(rateLimit({ max: config.rateMax }));
+   app.use(rateLimit({ max: config.rateMax, apiKey: config.apiKey }));
 
    // Docs stay ahead of securityHeaders: the Swagger UI page sets its own, looser
    // CSP, which the API's `default-src 'none'` would otherwise overwrite.

@@ -68,12 +68,19 @@ export function requireApiKey(apiKey) {
 
 /**
  * Fixed-window in-memory rate limiter, keyed by client IP.
- * @param {{ windowMs?: number, max?: number }} [opts]
+ *
+ * A request carrying the configured API key skips the limit entirely: that is
+ * the operator or a backend, and the cap exists to throttle anonymous payers
+ * polling a status, not the merchant's own traffic. Only bypasses when an
+ * apiKey is actually set — otherwise everything is open and the limit would
+ * fall away for everyone.
+ * @param {{ windowMs?: number, max?: number, apiKey?: string|null }} [opts]
  */
-export function rateLimit({ windowMs = 60_000, max = 60 } = {}) {
+export function rateLimit({ windowMs = 60_000, max = 60, apiKey = null } = {}) {
    /** @type {Map<string, { count: number, reset: number }>} */
    const hits = new Map();
    return (req, res, next) => {
+      if (apiKey && isAuthenticated(req, apiKey)) return next();
       const now = Date.now();
       const key = req.ip || req.socket?.remoteAddress || 'unknown';
       let rec = hits.get(key);
