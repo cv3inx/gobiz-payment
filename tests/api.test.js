@@ -367,20 +367,19 @@ test('public /health reports liveness but not trade volume', () => {
    }
 });
 
-test('the docs page loads its assets by absolute path', () => {
-   // The page used to ask for `./swagger-ui.css`, served out of node_modules by
-   // swagger-ui-express. The Nitro build does not carry that directory, so every
-   // asset 200'd with the HTML page itself and the docs rendered blank. They are
-   // Nitro public assets now, requested from the site root.
+test('the docs page is self-contained and renders from the spec', () => {
+   // The custom docs page inlines all CSS/JS and fetches /openapi.json at runtime —
+   // no external assets, so no /docs-assets mount to break under the Nitro build
+   // (which is what left the old Swagger UI page blank in production).
    for (const res of [results.docs, results.docsSlash]) {
       assert.strictEqual(res.status, 200);
       assert.match(res.type, /text\/html/);
-      assert.ok(res.body.includes('src="/docs-assets/swagger-ui-bundle.js"'), 'absolute asset path');
-      assert.ok(!res.body.includes('"./swagger-ui'), 'no relative asset path');
-      assert.ok(res.body.includes("url: '/openapi.json'"), 'points at the served spec');
+      assert.ok(!res.body.includes('/docs-assets/'), 'no external asset mount');
+      assert.ok(!res.body.includes('swagger-ui'), 'no swagger-ui dependency');
+      assert.ok(res.body.includes("fetch('/openapi.json'"), 'fetches the served spec');
    }
    assert.strictEqual(results.spec.status, 200);
-   assert.ok(results.spec.body.openapi?.startsWith('3.'), 'a spec Swagger UI can render');
+   assert.ok(results.spec.body.openapi?.startsWith('3.'), 'a renderable 3.x spec');
    assert.ok(Object.keys(results.spec.body.paths).length > 0, 'documents at least one path');
 });
 
